@@ -91,21 +91,20 @@ namespace AnycubicBridge
             bar.Height = 34;
             bar.BackColor = Color.FromArgb(238, 241, 244);
 
-            dashboardButton = MakeButton("Dashboard", 6);
+            dashboardButton = MakeButton("Aktualisieren", 6);
             dashboardButton.Click += delegate { ShowDashboard(); };
             bar.Controls.Add(dashboardButton);
 
-            chatButton = MakeButton("Chat", 104);
-            chatButton.Click += delegate { ShowChat(); };
-            if (chatUrl.Length == 0)
+            // Der Chat sitzt in der Anzeige selbst, sobald Claude Code da ist.
+            // Der Knopf zur Online-Seite ist dann ueberfluessig und wuerde nur
+            // verwirren - er erscheint nur als Ausweichweg ohne Claude Code.
+            claudeAvailable = FindClaudeCli() != null;
+            if (!claudeAvailable && chatUrl.Length > 0)
             {
-                chatButton.Enabled = false;
-                ToolTip tip = new ToolTip();
-                tip.SetToolTip(chatButton,
-                    "Kein Chat eingerichtet.\r\nDafuer braucht es ein eigenes Claude-Konto und ein eigenes\r\n" +
-                    "veroeffentlichtes Artifact - Anleitung im README.");
+                chatButton = MakeButton("Chat online", 104);
+                chatButton.Click += delegate { ShowChat(); };
+                bar.Controls.Add(chatButton);
             }
-            bar.Controls.Add(chatButton);
 
             statusLabel = new Label();
             statusLabel.AutoSize = false;
@@ -200,12 +199,58 @@ namespace AnycubicBridge
             // von der lokalen Claude-Code-Installation.
             webView.CoreWebView2.WebMessageReceived += OnPageMessage;
 
-            // Der Seite mitteilen, dass hier ein Chat moeglich ist.
-            claudeAvailable = FindClaudeCli() != null;
-            webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
-                "window.BRIDGE_HOST = { chat: " + (claudeAvailable ? "true" : "false") + " };");
+            if (bridgeTest) { RunBridgeTest(); return; }
 
-            ShowDashboard();
+            // Der Seite mitteilen, dass hier ein Chat moeglich ist - und erst
+            // DANACH die Anzeige laden. Sonst waere die Seite unter Umstaenden
+            // schon da, bevor die Kennzeichnung gesetzt ist, und der Chat bliebe
+            // ausgeblendet.
+            webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+                "window.BRIDGE_HOST = { chat: " + (claudeAvailable ? "true" : "false") + " };")
+                .ContinueWith(delegate
+                {
+                    try { BeginInvoke((MethodInvoker)delegate { ShowDashboard(); }); }
+                    catch { }
+                });
+        }
+
+        // Prueft den kompletten Weg: Seite -> Programm -> Claude Code -> zurueck
+        // in die Seite. Aufruf: Druckbett-Monitor.exe --bridge-test
+        public static bool bridgeTest;
+
+        private void RunBridgeTest()
+        {
+            webView.CoreWebView2.NavigateToString("<html><body>Test</body></html>");
+            webView.CoreWebView2.NavigationCompleted += delegate
+            {
+                webView.CoreWebView2.ExecuteScriptAsync(
+                    "window.chrome.webview.addEventListener('message', function (e) {" +
+                    "  document.title = 'ERGEBNIS:' + e.data;" +
+                    "});" +
+                    "window.chrome.webview.postMessage('frage:Antworte mit genau einem Wort: bruecke-ok');");
+
+                Timer poll = new Timer();
+                poll.Interval = 1000;
+                int ticks = 0;
+                poll.Tick += delegate
+                {
+                    ticks++;
+                    string title = webView.CoreWebView2.DocumentTitle;
+                    if (title != null && title.StartsWith("ERGEBNIS:"))
+                    {
+                        poll.Stop();
+                        Console.WriteLine(title);
+                        Application.Exit();
+                    }
+                    else if (ticks > 90)
+                    {
+                        poll.Stop();
+                        Console.WriteLine("FEHLER: keine Antwort in 90 Sekunden");
+                        Application.Exit();
+                    }
+                };
+                poll.Start();
+            };
         }
 
         private void OnPageMessage(object sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -332,7 +377,7 @@ namespace AnycubicBridge
             return null;
         }
 
-        private string AskClaude(string prompt)
+        public string AskClaude(string prompt)
         {
             string cli = FindClaudeCli();
             if (cli == null) { throw new Exception("Claude Code wurde nicht gefunden."); }
@@ -346,20 +391,44 @@ namespace AnycubicBridge
             psi.RedirectStandardError = true;
             psi.StandardOutputEncoding = System.Text.Encoding.UTF8;
 
-            using (Process proc = Process.Start(psi))
+            using (Process proc = new Process())
             {
+                proc.StartInfo = psi;
+
+                // Beide Ausgabekanaele NEBENLAEUFIG lesen. Nacheinander zu lesen
+                // blockiert, sobald der andere Puffer volllaeuft - dann haengt
+                // die Antwort fuer immer.
+                System.Text.StringBuilder outBuf = new System.Text.StringBuilder();
+                System.Text.StringBuilder errBuf = new System.Text.StringBuilder();
+                proc.OutputDataReceived += delegate (object s, DataReceivedEventArgs a)
+                {
+                    if (a.Data != null) { outBuf.AppendLine(a.Data); }
+                };
+                proc.ErrorDataReceived += delegate (object s, DataReceivedEventArgs a)
+                {
+                    if (a.Data != null) { errBuf.AppendLine(a.Data); }
+                };
+
+                proc.Start();
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+
                 // Die Frage ueber die Standardeingabe schicken statt als
                 // Argument: so koennen Anfuehrungszeichen und Umbrueche im Text
                 // nichts zerlegen.
                 proc.StandardInput.Write(prompt);
                 proc.StandardInput.Close();
 
-                string output = proc.StandardOutput.ReadToEnd();
-                string error = proc.StandardError.ReadToEnd();
-                proc.WaitForExit(180000);
+                if (!proc.WaitForExit(180000))
+                {
+                    try { proc.Kill(); } catch { }
+                    throw new Exception("Claude Code hat nicht geantwortet (Zeitueberschreitung).");
+                }
 
-                if (output.Trim().Length > 0) { return output.Trim(); }
-                if (error.Trim().Length > 0) { throw new Exception(error.Trim()); }
+                string output = outBuf.ToString().Trim();
+                string error = errBuf.ToString().Trim();
+                if (output.Length > 0) { return output; }
+                if (error.Length > 0) { throw new Exception(error); }
                 return "(keine Antwort)";
             }
         }
@@ -434,6 +503,28 @@ namespace AnycubicBridge
         [STAThread]
         public static void Main(string[] args)
         {
+            // Diagnose: prueft die Chat-Anbindung ueber genau denselben Weg,
+            // den auch das Fenster benutzt. Aufruf:
+            //   Druckbett-Monitor.exe --chat-test "deine frage"
+            if (Array.IndexOf(args, "--chat-test") >= 0)
+            {
+                int i = Array.IndexOf(args, "--chat-test");
+                string frage = (i + 1 < args.Length) ? args[i + 1] : "Antworte mit einem Wort: bereit";
+                MonitorForm form = new MonitorForm();
+                try
+                {
+                    string antwort = form.AskClaude(frage);
+                    Console.WriteLine("OK: " + antwort);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("FEHLER: " + ex.Message);
+                }
+                return;
+            }
+
+            bridgeTest = Array.IndexOf(args, "--bridge-test") >= 0;
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 

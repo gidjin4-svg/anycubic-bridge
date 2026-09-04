@@ -764,17 +764,36 @@
     var d = state.data;
     var kontext = buildInstructionsTurn();
 
-    function onAntwort(e) {
-      var raw = typeof e.data === 'string' ? e.data : '';
-      if (raw.indexOf('antwort:') !== 0) return;
+    var fertig = false;
+    function abschluss(inhalt, istFehler) {
+      if (fertig) return;
+      fertig = true;
       window.chrome.webview.removeEventListener('message', onAntwort);
-      state.turns[placeholderIndex].content = raw.substring('antwort:'.length);
+      state.turns[placeholderIndex].content = inhalt;
+      if (istFehler) { state.turns[placeholderIndex].error = true; }
       state.sending = false;
       els.sendBtn.disabled = false;
       renderChatLog();
     }
+
+    function onAntwort(e) {
+      var raw = typeof e.data === 'string' ? e.data : '';
+      if (raw.indexOf('antwort:') !== 0) return;
+      abschluss(raw.substring('antwort:'.length), false);
+    }
     window.chrome.webview.addEventListener('message', onAntwort);
-    window.chrome.webview.postMessage('frage:' + kontext + '\n\nFrage: ' + text);
+
+    // Lieber eine ehrliche Fehlermeldung als endlos "Denkt nach...".
+    setTimeout(function () {
+      abschluss('Keine Antwort von Claude Code (nach 3 Minuten abgebrochen). ' +
+                'Laeuft es? Test: "claude -p hallo" in einer Eingabeaufforderung.', true);
+    }, 185000);
+
+    try {
+      window.chrome.webview.postMessage('frage:' + kontext + '\n\nFrage: ' + text);
+    } catch (err) {
+      abschluss('Konnte die Frage nicht uebergeben: ' + err.message, true);
+    }
   }
 
   async function sendMessage() {
