@@ -12,10 +12,11 @@
 
 [CmdletBinding()]
 param(
-    # Adresse deines EIGENEN veroeffentlichten Claude-Artifacts fuer den Chat.
-    # Ohne Angabe laeuft nur die Anzeige - der Chat-Knopf bleibt aus.
-    # Jeder braucht dafuer sein eigenes Claude-Konto, siehe README.
+    # Adresse eines EIGENEN veroeffentlichten Claude-Artifacts. Nur noch ein
+    # Zusatzweg fuer den Chat im Browser - der Hauptweg laeuft ueber Claude Code.
     [string]$ChatUrl = '',
+    # Chat-Einrichtung ueberspringen: dann bleibt es bei der reinen Anzeige.
+    [switch]$OhneChat,
     [switch]$KeineVerknuepfung
 )
 
@@ -88,6 +89,97 @@ try {
 } catch {
     Write-Warning "  Konnte noch keine Daten erzeugen: $($_.Exception.Message)"
     Write-Warning "  Das ist normal, solange kein Modell geladen wurde."
+}
+
+# --- Chat einrichten (optional) --------------------------------------
+# Der Chat im Fenster wird von Claude Code beantwortet, das auf DIESEM Rechner
+# laeuft. Deshalb wird hier geprueft, ob es installiert und angemeldet ist.
+if (-not $OhneChat) {
+    Write-Host ""
+    Write-Host "----------------------------------------------------------"
+    Write-Host " Chat im Fenster einrichten (optional)"
+    Write-Host "----------------------------------------------------------"
+    Write-Host ""
+    Write-Host " Was der Chat ist:"
+    Write-Host "   Im Fenster kannst du Fragen zum aktuellen Teil stellen"
+    Write-Host "   ('warum Support an?', 'was aendert sich bei 0.3 mm?')."
+    Write-Host ""
+    Write-Host " Wie er funktioniert - und was dabei wirklich passiert:"
+    Write-Host "   Die Frage wird zusammen mit den Daten aus dem Dashboard"
+    Write-Host "   (Modellname, Masse, Ueberhaenge, gesetzte Werte) an Claude Code"
+    Write-Host "   auf DIESEM Rechner uebergeben. Claude Code schickt das an"
+    Write-Host "   Anthropic und gibt die Antwort zurueck ins Fenster."
+    Write-Host ""
+    Write-Host "   Das heisst konkret:"
+    Write-Host "   - Deine Frage und die Modelldaten gehen an Anthropic."
+    Write-Host "     Das Modell selbst und deine Dateien werden NICHT hochgeladen."
+    Write-Host "   - Es laeuft ueber DEIN Claude-Konto und dein Kontingent."
+    Write-Host "   - Dieses Programm speichert KEINEN Schluessel und KEIN Passwort."
+    Write-Host "     Die Anmeldung gehoert Claude Code, nicht diesem Werkzeug."
+    Write-Host "   - Ohne Chat funktioniert alles andere weiterhin - die Anzeige"
+    Write-Host "     laeuft komplett offline."
+    Write-Host ""
+
+    $claude = Get-Command claude -ErrorAction SilentlyContinue
+
+    if (-not $claude) {
+        Write-Host " Claude Code ist auf diesem Rechner nicht installiert."
+        Write-Host " Es wird ueber npm installiert (Paket: @anthropic-ai/claude-code)."
+        Write-Host ""
+        $npm = Get-Command npm -ErrorAction SilentlyContinue
+        if (-not $npm) {
+            Write-Warning " Dafuer fehlt Node.js/npm. Ohne das geht der Chat nicht."
+            Write-Host " Node.js gibt es hier: https://nodejs.org"
+            Write-Host " Danach diese Installation einfach nochmal starten."
+        } else {
+            $antwort = Read-Host " Jetzt installieren? (j/n)"
+            if ($antwort -match '^[jJyY]') {
+                Write-Host " Installiere... (kann ein paar Minuten dauern)"
+                & npm install -g '@anthropic-ai/claude-code'
+                $claude = Get-Command claude -ErrorAction SilentlyContinue
+                if ($claude) { Write-Host " Claude Code installiert." }
+                else { Write-Warning " Installation hat nicht geklappt - Chat bleibt aus." }
+            } else {
+                Write-Host " Uebersprungen - der Chat bleibt aus, alles andere laeuft."
+            }
+        }
+    } else {
+        Write-Host " Claude Code gefunden: $($claude.Source)"
+    }
+
+    # --- Anmeldung pruefen -------------------------------------------
+    if ($claude) {
+        Write-Host ""
+        Write-Host " Pruefe die Anmeldung..."
+        $angemeldet = $false
+        try {
+            $test = ('Antworte mit genau einem Wort: bereit' | & claude -p 2>&1 | Out-String)
+            if ($test -match 'bereit') { $angemeldet = $true }
+        } catch { }
+
+        if ($angemeldet) {
+            Write-Host " Angemeldet - der Chat ist einsatzbereit."
+        } else {
+            Write-Host ""
+            Write-Host " Noch nicht angemeldet."
+            Write-Host ""
+            Write-Host "   Die Anmeldung macht Claude Code selbst, nicht dieses Programm:"
+            Write-Host "   es oeffnet deinen Browser, du bestaetigst dort mit deinem"
+            Write-Host "   Claude-Konto, fertig. Du gibst hier KEIN Passwort ein, und"
+            Write-Host "   dieses Werkzeug bekommt deine Zugangsdaten nie zu sehen."
+            Write-Host ""
+            $antwort = Read-Host " Anmeldung jetzt starten? (j/n)"
+            if ($antwort -match '^[jJyY]') {
+                Write-Host " Claude Code wird geoeffnet - dort anmelden, danach das"
+                Write-Host " Fenster schliessen und diese Installation nochmal starten."
+                Start-Process 'cmd.exe' -ArgumentList '/k', 'claude'
+            } else {
+                Write-Host " Uebersprungen. Du kannst dich spaeter jederzeit anmelden:"
+                Write-Host "   einfach 'claude' in einer Eingabeaufforderung starten."
+            }
+        }
+    }
+    Write-Host ""
 }
 
 # --- Verknuepfung ----------------------------------------------------

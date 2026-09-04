@@ -125,6 +125,37 @@ Dieselbe HTML-Datei läuft in beiden Welten: als veröffentlichtes Artifact mit
 Live-Chat, oder lokal aus der Datendatei (dann ohne Chat, mit Link darauf).
 Deshalb gibt es nur eine Vorlage, die nicht auseinanderlaufen kann.
 
+## Chat im Fenster (optional)
+
+Im Fenster lassen sich Fragen zum aktuellen Teil stellen — *warum ist Support
+an? was ändert sich bei 0,3 mm?* Die Installation richtet das ein und erklärt
+es; hier dasselbe schriftlich, weil man vor einer Installation wissen sollte,
+worauf man sich einlässt.
+
+**Wie es läuft:** Die Frage wird zusammen mit den Dashboard-Daten (Modellname,
+Maße, Überhänge, gesetzte Werte samt Begründung) an
+[Claude Code](https://claude.com/claude-code) übergeben, das **auf dem eigenen
+Rechner** läuft. Claude Code schickt das an Anthropic und gibt die Antwort
+zurück ins Fenster.
+
+**Was das konkret heißt:**
+
+- Frage und Modelldaten gehen an Anthropic. Die Modelldateien selbst werden
+  **nicht** hochgeladen.
+- Es läuft über das **eigene** Claude-Konto und das eigene Kontingent.
+- Dieses Werkzeug speichert **keinen Schlüssel und kein Passwort**. Die
+  Anmeldung gehört Claude Code, sie läuft nicht durch dieses Programm.
+- Ohne Chat funktioniert alles andere weiter — die Anzeige läuft komplett
+  offline.
+
+**Einrichtung:** Der Installer prüft, ob Claude Code da ist, bietet die
+Installation an (`npm i -g @anthropic-ai/claude-code`) und prüft die Anmeldung,
+indem er tatsächlich eine Frage stellt. Die Anmeldung selbst macht Claude Code:
+Browser auf, mit dem Claude-Konto bestätigen, fertig. Hier wird kein Passwort
+eingegeben.
+
+Chat überspringen: `.\install.ps1 -OhneChat`
+
 ## Begleit-Chatfenster (Druckbett-Monitor)
 
 `companion/druckbett-monitor.html` ist als Claude Artifact veröffentlicht —

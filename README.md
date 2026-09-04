@@ -79,22 +79,44 @@ that are stacked in Z. Lettering raised on a top surface works. Lettering on a
 vertical side does not — every layer there contains both parts at once. That
 needs two extruders.
 
-## Chat (optional, bring your own Claude account)
+## Chat (optional)
 
-The window has a Chat button that opens a Claude page which knows the current
-model and settings. **This is not included and not shared** — there is no key
-and no account in this repository. Everyone uses their own Claude account and
-their own published page:
+You can ask questions about the part right in the window — *why is support on?
+what changes at 0.3 mm?* The installer sets this up and explains it; here is
+the same information in writing, because you should know what you are agreeing
+to before you install anything.
 
-1. Open `companion/druckbett-monitor.html` in a Claude session and publish it
-   as an artifact of your own (it needs the `db` and `sample` capabilities)
-2. Pass your own URL to the installer:
+**How it works.** Your question is handed, together with the dashboard data
+(model name, dimensions, overhangs, the settings and their reasons), to
+[Claude Code](https://claude.com/claude-code) running **on your own machine**.
+Claude Code sends that to Anthropic and returns the answer to the window.
+
+**What that means concretely:**
+
+- Your question and the model data go to Anthropic. Your model files
+  themselves are never uploaded.
+- It runs on **your** Claude account and your own usage allowance.
+- This tool stores **no key and no password**. The login belongs to Claude
+  Code, not to this widget — it is not passed through here.
+- Skip it and everything else still works. The dashboard runs entirely offline.
+
+**Setup.** The installer checks whether Claude Code is present, offers to
+install it (`npm i -g @anthropic-ai/claude-code`), and checks whether you are
+signed in by actually asking it a question. Signing in is Claude Code's own
+browser flow: it opens your browser, you confirm with your Claude account,
+done. No password is typed into this tool.
+
+To skip the chat entirely:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -ChatUrl "https://claude.ai/code/artifact/<your-id>"
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -OhneChat
 ```
 
-Without that, everything else still works — the Chat button simply stays off.
+**Alternative: chat in the browser.** If you would rather not install Claude
+Code, you can publish `companion/druckbett-monitor.html` as your own Claude
+artifact (it needs the `db` and `sample` capabilities) and point the installer
+at it with `-ChatUrl "https://claude.ai/code/artifact/<your-id>"`. That opens
+in a browser instead of the window.
 
 ## Build it yourself
 

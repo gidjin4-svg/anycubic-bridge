@@ -703,7 +703,24 @@
     return (window.BRIDGE_CONFIG && window.BRIDGE_CONFIG.chatUrl) || '';
   }
 
+  // Im eigenen Programm beantwortet die lokale Claude-Code-Installation die
+  // Fragen - kein Login, kein Schluessel. Das Programm meldet das ueber
+  // window.BRIDGE_HOST.
+  function hostChat() {
+    return !!(window.BRIDGE_HOST && window.BRIDGE_HOST.chat && window.chrome && window.chrome.webview);
+  }
+
   function updateChatAvailability() {
+    if (hostChat()) {
+      els.chatCard.hidden = false;
+      els.localChatNote.hidden = true;
+      els.sendBtn.disabled = state.sending;
+      els.chatInput.disabled = false;
+      els.chatInput.placeholder = 'Frag etwas zum aktuellen Modell oder Profil…';
+      els.chatHint.textContent = 'Antworten kommen von Claude Code auf diesem Rechner.';
+      return;
+    }
+
     var ok = !!state.sampleApi;
     if (ok) {
       els.chatCard.hidden = false;
@@ -734,9 +751,37 @@
     els.localChatNote.hidden = false;
   }
 
+  // Weg 1: im eigenen Programm - die Frage geht an Claude Code auf dem Rechner.
+  function sendViaHost(text) {
+    state.sending = true;
+    els.chatInput.value = '';
+    els.sendBtn.disabled = true;
+    state.turns.push({ role: 'user', content: text });
+    state.turns.push({ role: 'assistant', content: '' });
+    renderChatLog();
+
+    var placeholderIndex = state.turns.length - 1;
+    var d = state.data;
+    var kontext = buildInstructionsTurn();
+
+    function onAntwort(e) {
+      var raw = typeof e.data === 'string' ? e.data : '';
+      if (raw.indexOf('antwort:') !== 0) return;
+      window.chrome.webview.removeEventListener('message', onAntwort);
+      state.turns[placeholderIndex].content = raw.substring('antwort:'.length);
+      state.sending = false;
+      els.sendBtn.disabled = false;
+      renderChatLog();
+    }
+    window.chrome.webview.addEventListener('message', onAntwort);
+    window.chrome.webview.postMessage('frage:' + kontext + '\n\nFrage: ' + text);
+  }
+
   async function sendMessage() {
     var text = els.chatInput.value.trim();
-    if (!text || !state.sampleApi || state.sending) return;
+    if (!text || state.sending) return;
+    if (hostChat()) { sendViaHost(text); return; }
+    if (!state.sampleApi) return;
     state.sending = true;
     els.chatInput.value = '';
     els.sendBtn.disabled = true;

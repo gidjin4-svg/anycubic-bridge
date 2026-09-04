@@ -44,6 +44,7 @@ namespace AnycubicBridge
         private Label statusLabel;
         private FileSystemWatcher fileWatcher;
         private bool showingChat;
+        private bool claudeAvailable;
 
         public MonitorForm()
         {
@@ -195,7 +196,45 @@ namespace AnycubicBridge
                 if (HandleAuthUrl(args.Uri)) { args.Cancel = true; }
             };
 
+            // Die Anzeige schickt Chat-Fragen hierher; beantwortet werden sie
+            // von der lokalen Claude-Code-Installation.
+            webView.CoreWebView2.WebMessageReceived += OnPageMessage;
+
+            // Der Seite mitteilen, dass hier ein Chat moeglich ist.
+            claudeAvailable = FindClaudeCli() != null;
+            webView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
+                "window.BRIDGE_HOST = { chat: " + (claudeAvailable ? "true" : "false") + " };");
+
             ShowDashboard();
+        }
+
+        private void OnPageMessage(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            string raw;
+            try { raw = e.TryGetWebMessageAsString(); }
+            catch { return; }
+            if (raw == null || !raw.StartsWith("frage:")) { return; }
+
+            string frage = raw.Substring("frage:".Length);
+
+            // In einem eigenen Thread, damit das Fenster waehrenddessen bedienbar
+            // bleibt - eine Antwort dauert einige Sekunden.
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                string antwort;
+                try { antwort = AskClaude(frage); }
+                catch (Exception ex) { antwort = "Fehler: " + ex.Message; }
+
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (webView == null || webView.CoreWebView2 == null) { return; }
+                        webView.CoreWebView2.PostWebMessageAsString("antwort:" + antwort);
+                    });
+                }
+                catch { }
+            });
         }
 
         private void ShowDashboard()
@@ -246,8 +285,11 @@ namespace AnycubicBridge
                 "Anmeldung", MessageBoxButtons.YesNo, MessageBoxIcon.Information,
                 MessageBoxDefaultButton.Button2);
 
+            // Bei "Nein" bewusst NICHT zurueckspringen: ein erneutes Navigieren
+            // wertet die Anmeldeseite als fehlgeschlagenen Versuch und zeigt
+            // eine rote Fehlermeldung. Einfach stehenbleiben, dann kann direkt
+            // das E-Mail-Feld benutzt werden.
             if (answer == DialogResult.Yes) { OpenExternally(uri); }
-            else { ShowChat(); }
             return true;
         }
 
@@ -264,6 +306,61 @@ namespace AnycubicBridge
                 MessageBox.Show("Konnte den Browser nicht oeffnen:\r\n" + ex.Message +
                                 "\r\n\r\nAdresse:\r\n" + url,
                                 "Druckbett-Monitor", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // --- Chat ueber die lokale Claude-Code-Installation ------------------
+        // Der eleganteste Weg zum Chat im eigenen Fenster: Claude Code ist auf
+        // dem Rechner bereits angemeldet. Ein Aufruf im Hintergrund braucht
+        // deshalb weder Login noch API-Schluessel und laeuft ueber das
+        // bestehende Abo. Antwortzeit rund 5-10 Sekunden.
+
+        private static string FindClaudeCli()
+        {
+            string path = Environment.GetEnvironmentVariable("PATH");
+            if (path == null) { return null; }
+            foreach (string dir in path.Split(';'))
+            {
+                if (dir.Length == 0) { continue; }
+                try
+                {
+                    string candidate = Path.Combine(dir.Trim(), "claude.cmd");
+                    if (File.Exists(candidate)) { return candidate; }
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private string AskClaude(string prompt)
+        {
+            string cli = FindClaudeCli();
+            if (cli == null) { throw new Exception("Claude Code wurde nicht gefunden."); }
+
+            ProcessStartInfo psi = new ProcessStartInfo(cli);
+            psi.Arguments = "-p";
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.RedirectStandardInput = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = System.Text.Encoding.UTF8;
+
+            using (Process proc = Process.Start(psi))
+            {
+                // Die Frage ueber die Standardeingabe schicken statt als
+                // Argument: so koennen Anfuehrungszeichen und Umbrueche im Text
+                // nichts zerlegen.
+                proc.StandardInput.Write(prompt);
+                proc.StandardInput.Close();
+
+                string output = proc.StandardOutput.ReadToEnd();
+                string error = proc.StandardError.ReadToEnd();
+                proc.WaitForExit(180000);
+
+                if (output.Trim().Length > 0) { return output.Trim(); }
+                if (error.Trim().Length > 0) { throw new Exception(error.Trim()); }
+                return "(keine Antwort)";
             }
         }
 
