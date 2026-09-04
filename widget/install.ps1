@@ -92,17 +92,35 @@ try {
 
 # --- Verknuepfung ----------------------------------------------------
 if (-not $KeineVerknuepfung) {
+    # Im gepackten Ordner liegt das Programm daneben, im Quellbaum unter dist\.
     $exe = Join-Path $here 'Druckbett-Monitor.exe'
+    if (-not (Test-Path -LiteralPath $exe)) { $exe = Join-Path $here 'dist\Druckbett-Monitor.exe' }
+
     if (Test-Path -LiteralPath $exe) {
-        $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Druckbett-Monitor.lnk'
+        $exeDir = Split-Path -Parent $exe
+        $desktop = [Environment]::GetFolderPath('Desktop')
         $shell = New-Object -ComObject WScript.Shell
-        $sc = $shell.CreateShortcut($lnk)
+
+        # Eine Verknuepfung startet beides, eine nur das Fenster - fuer den Fall,
+        # dass der Slicer schon offen ist.
+        $sc = $shell.CreateShortcut((Join-Path $desktop 'Anycubic Slicer + Monitor.lnk'))
         $sc.TargetPath = $exe
-        $sc.WorkingDirectory = $here
+        $sc.WorkingDirectory = $exeDir
         $sc.Arguments = '--mit-slicer'
-        $sc.Description = 'Anycubic Slicer Next mit Druckbett-Monitor starten'
+        $sc.Description = 'Anycubic Slicer Next zusammen mit dem Druckbett-Monitor starten'
         $sc.Save()
-        Write-Host "  Verknuepfung auf dem Desktop angelegt (startet auch den Slicer)."
+
+        $sc2 = $shell.CreateShortcut((Join-Path $desktop 'Druckbett-Monitor.lnk'))
+        $sc2.TargetPath = $exe
+        $sc2.WorkingDirectory = $exeDir
+        $sc2.Description = 'Nur das Monitor-Fenster oeffnen'
+        $sc2.Save()
+
+        Write-Host "  Zwei Verknuepfungen auf dem Desktop:"
+        Write-Host "    'Anycubic Slicer + Monitor'  - startet beides"
+        Write-Host "    'Druckbett-Monitor'          - nur das Fenster"
+    } else {
+        Write-Warning "  Druckbett-Monitor.exe nicht gefunden - keine Verknuepfung angelegt."
     }
 }
 
