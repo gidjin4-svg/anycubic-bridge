@@ -4,7 +4,12 @@
 //  Eigenes Fenster (kein Browser-Tab) mit WebView2. Zeigt das lokale
 //  Dashboard aus %APPDATA%\AnycubicBridge\monitor.html, das vom
 //  Hintergrund-Watcher der Bridge aktuell gehalten wird - laeuft damit
-//  offline. Ueber den Chat-Knopf laesst sich das Claude-Fenster oeffnen.
+//  offline.
+//
+//  Im Fenster laeuft AUSSCHLIESSLICH diese lokale Anzeige. Alles was ins
+//  Netz fuehrt - allen voran der Chat - wird an den normalen Browser
+//  uebergeben: Anmeldungen ueber Google & Co. werden in eingebetteten
+//  Fenstern blockiert und funktionieren nur im richtigen Browser.
 //
 //  Gebaut mit dem in Windows enthaltenen C#-Compiler, kein SDK noetig.
 //  Siehe build.ps1.
@@ -37,7 +42,6 @@ namespace AnycubicBridge
         private Button chatButton;
         private Label statusLabel;
         private FileSystemWatcher fileWatcher;
-        private bool showingChat;
 
         public MonitorForm()
         {
@@ -84,12 +88,13 @@ namespace AnycubicBridge
             bar.Height = 34;
             bar.BackColor = Color.FromArgb(238, 241, 244);
 
-            dashboardButton = MakeButton("Dashboard", 6);
+            dashboardButton = MakeButton("Aktualisieren", 6);
             dashboardButton.Click += delegate { ShowDashboard(); };
             bar.Controls.Add(dashboardButton);
 
-            chatButton = MakeButton("Chat", 104);
-            chatButton.Click += delegate { ShowChat(); };
+            chatButton = MakeButton("Chat im Browser", 104);
+            chatButton.Width = 110;
+            chatButton.Click += delegate { OpenChatInBrowser(); };
             if (chatUrl.Length == 0)
             {
                 chatButton.Enabled = false;
@@ -171,15 +176,25 @@ namespace AnycubicBridge
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
 
-            // Links, die ein neues Fenster oeffnen wuerden, im selben Fenster
-            // anzeigen - sonst landet man doch wieder im Browser.
+            // Alles was nach draussen fuehrt, geht in den richtigen Browser -
+            // nur dort funktionieren Anmeldungen zuverlaessig.
             webView.CoreWebView2.NewWindowRequested += delegate (
                 object s, CoreWebView2NewWindowRequestedEventArgs args)
             {
                 args.Handled = true;
-                webView.CoreWebView2.Navigate(args.Uri);
-                showingChat = true;
-                UpdateStatus();
+                OpenExternally(args.Uri);
+            };
+
+            // Auch normale Klicks auf externe Adressen nach draussen geben; im
+            // Fenster selbst laeuft ausschliesslich die lokale Anzeige.
+            webView.CoreWebView2.NavigationStarting += delegate (
+                object s, CoreWebView2NavigationStartingEventArgs args)
+            {
+                if (args.Uri != null && args.Uri.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                {
+                    args.Cancel = true;
+                    OpenExternally(args.Uri);
+                }
             };
 
             ShowDashboard();
@@ -187,7 +202,6 @@ namespace AnycubicBridge
 
         private void ShowDashboard()
         {
-            showingChat = false;
             if (!File.Exists(monitorPath))
             {
                 webView.CoreWebView2.NavigateToString(
@@ -203,12 +217,30 @@ namespace AnycubicBridge
             UpdateStatus();
         }
 
-        private void ShowChat()
+        // Der Chat laeuft bewusst im normalen Browser, nicht in diesem Fenster:
+        // Anmeldungen ueber Google & Co. werden in eingebetteten Fenstern
+        // blockiert ("this browser may not be secure"). Im richtigen Browser
+        // funktioniert die Anmeldung normal - so macht es Claude Code auch.
+        private void OpenChatInBrowser()
         {
             if (chatUrl.Length == 0) { return; }
-            showingChat = true;
-            webView.CoreWebView2.Navigate(chatUrl);
-            UpdateStatus();
+            OpenExternally(chatUrl);
+        }
+
+        private void OpenExternally(string url)
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(url);
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Konnte den Browser nicht oeffnen:\r\n" + ex.Message +
+                                "\r\n\r\nAdresse:\r\n" + url,
+                                "Druckbett-Monitor", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private string ReadChatUrl()
@@ -234,20 +266,9 @@ namespace AnycubicBridge
 
         private void UpdateStatus()
         {
-            string text;
-            if (showingChat)
-            {
-                text = "Chat - laeuft ueber dein Claude-Konto";
-            }
-            else if (File.Exists(dataFile))
-            {
-                text = "Daten von " + File.GetLastWriteTime(dataFile).ToString("HH:mm:ss");
-            }
-            else
-            {
-                text = "keine Daten";
-            }
-            statusLabel.Text = text;
+            statusLabel.Text = File.Exists(dataFile)
+                ? "Daten von " + File.GetLastWriteTime(dataFile).ToString("HH:mm:ss")
+                : "keine Daten";
         }
 
         private void WatchDataFile()
@@ -267,7 +288,7 @@ namespace AnycubicBridge
                     {
                         t.Stop();
                         t.Dispose();
-                        if (!showingChat && webView != null && webView.CoreWebView2 != null)
+                        if (webView != null && webView.CoreWebView2 != null)
                         {
                             webView.CoreWebView2.Reload();
                         }

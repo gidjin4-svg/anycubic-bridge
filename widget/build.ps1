@@ -49,14 +49,16 @@ function New-IcoFromPng {
     $bw.Dispose(); $ms.Dispose()
 }
 
-$iconPng = Join-Path $env:TEMP 'monitor-icon.png'
+# Festes Logo, KEINE Modell-Vorschau: sonst haette das Programm bei jedem
+# Bauen ein anderes Symbol (war anfangs so - der Tuergriff als App-Icon).
 $bridge = Join-Path $root 'anycubic-bridge.ps1'
+$logo = Join-Path $here 'logo.png'
 $iconMade = $false
 try {
-    & $bridge preview -PreviewSize 256 -OutFile $iconPng | Out-Null
-    New-IcoFromPng -PngPath $iconPng -IcoPath (Join-Path $dist 'monitor.ico')
+    if (-not (Test-Path -LiteralPath $logo)) { & (Join-Path $here 'make-logo.ps1') | Out-Null }
+    New-IcoFromPng -PngPath $logo -IcoPath (Join-Path $dist 'monitor.ico')
     $iconMade = $true
-    "Icon aus aktueller Modell-Vorschau erzeugt."
+    "Icon aus logo.png uebernommen."
 } catch {
     "Hinweis: Icon konnte nicht erzeugt werden ($($_.Exception.Message)) - Widget laeuft trotzdem."
 }
