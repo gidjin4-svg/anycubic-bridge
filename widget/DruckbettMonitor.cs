@@ -6,10 +6,11 @@
 //  Hintergrund-Watcher der Bridge aktuell gehalten wird - laeuft damit
 //  offline.
 //
-//  Im Fenster laeuft AUSSCHLIESSLICH diese lokale Anzeige. Alles was ins
-//  Netz fuehrt - allen voran der Chat - wird an den normalen Browser
-//  uebergeben: Anmeldungen ueber Google & Co. werden in eingebetteten
-//  Fenstern blockiert und funktionieren nur im richtigen Browser.
+//  Der Chat laeuft ebenfalls IM Fenster - das ist der Sinn eines eigenen
+//  Programms. Sonderfall Anmeldung: Google verbietet sie in eingebetteten
+//  Fenstern. Deshalb wird an dieser Stelle erklaert, dass die Anmeldung per
+//  E-Mail-Code hier im Fenster funktioniert. Eine Anmeldung im externen
+//  Browser wuerde dem Programm nichts nuetzen - die Sitzung bliebe dort.
 //
 //  Gebaut mit dem in Windows enthaltenen C#-Compiler, kein SDK noetig.
 //  Siehe build.ps1.
@@ -42,6 +43,7 @@ namespace AnycubicBridge
         private Button chatButton;
         private Label statusLabel;
         private FileSystemWatcher fileWatcher;
+        private bool showingChat;
 
         public MonitorForm()
         {
@@ -88,13 +90,12 @@ namespace AnycubicBridge
             bar.Height = 34;
             bar.BackColor = Color.FromArgb(238, 241, 244);
 
-            dashboardButton = MakeButton("Aktualisieren", 6);
+            dashboardButton = MakeButton("Dashboard", 6);
             dashboardButton.Click += delegate { ShowDashboard(); };
             bar.Controls.Add(dashboardButton);
 
-            chatButton = MakeButton("Chat im Browser", 104);
-            chatButton.Width = 110;
-            chatButton.Click += delegate { OpenChatInBrowser(); };
+            chatButton = MakeButton("Chat", 104);
+            chatButton.Click += delegate { ShowChat(); };
             if (chatUrl.Length == 0)
             {
                 chatButton.Enabled = false;
@@ -176,25 +177,22 @@ namespace AnycubicBridge
             webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
 
-            // Alles was nach draussen fuehrt, geht in den richtigen Browser -
-            // nur dort funktionieren Anmeldungen zuverlaessig.
+            // Popups (Anmeldefenster, externe Links) im selben Fenster zeigen,
+            // damit man nicht aus dem Programm faellt.
             webView.CoreWebView2.NewWindowRequested += delegate (
                 object s, CoreWebView2NewWindowRequestedEventArgs args)
             {
                 args.Handled = true;
-                OpenExternally(args.Uri);
+                if (HandleAuthUrl(args.Uri)) { return; }
+                webView.CoreWebView2.Navigate(args.Uri);
+                showingChat = true;
+                UpdateStatus();
             };
 
-            // Auch normale Klicks auf externe Adressen nach draussen geben; im
-            // Fenster selbst laeuft ausschliesslich die lokale Anzeige.
             webView.CoreWebView2.NavigationStarting += delegate (
                 object s, CoreWebView2NavigationStartingEventArgs args)
             {
-                if (args.Uri != null && args.Uri.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                {
-                    args.Cancel = true;
-                    OpenExternally(args.Uri);
-                }
+                if (HandleAuthUrl(args.Uri)) { args.Cancel = true; }
             };
 
             ShowDashboard();
@@ -202,6 +200,7 @@ namespace AnycubicBridge
 
         private void ShowDashboard()
         {
+            showingChat = false;
             if (!File.Exists(monitorPath))
             {
                 webView.CoreWebView2.NavigateToString(
@@ -217,14 +216,39 @@ namespace AnycubicBridge
             UpdateStatus();
         }
 
-        // Der Chat laeuft bewusst im normalen Browser, nicht in diesem Fenster:
-        // Anmeldungen ueber Google & Co. werden in eingebetteten Fenstern
-        // blockiert ("this browser may not be secure"). Im richtigen Browser
-        // funktioniert die Anmeldung normal - so macht es Claude Code auch.
-        private void OpenChatInBrowser()
+        // Der Chat laeuft IM Fenster - das ist der Sinn eines eigenen Programms.
+        // Nur die Anmeldung ist der Sonderfall, siehe HandleAuthUrl.
+        private void ShowChat()
         {
             if (chatUrl.Length == 0) { return; }
-            OpenExternally(chatUrl);
+            showingChat = true;
+            webView.CoreWebView2.Navigate(chatUrl);
+            UpdateStatus();
+        }
+
+        // Google verbietet die Anmeldung in eingebetteten Fenstern. Statt den
+        // Nutzer in eine Sackgasse laufen zu lassen, wird hier erklaert, was
+        // funktioniert: die Anmeldung per E-Mail-Code laeuft direkt hier im
+        // Fenster - nur dann bleibt die Sitzung auch im Programm bestehen.
+        // Eine Anmeldung im externen Browser wuerde dem Fenster nichts nuetzen,
+        // weil sie in dessen eigener Sitzung landet.
+        private bool HandleAuthUrl(string uri)
+        {
+            if (uri == null) { return false; }
+            if (uri.IndexOf("accounts.google.com", StringComparison.OrdinalIgnoreCase) < 0) { return false; }
+
+            DialogResult answer = MessageBox.Show(
+                "Google laesst die Anmeldung in eingebetteten Fenstern nicht zu.\r\n\r\n" +
+                "Melde dich hier im Fenster stattdessen mit E-Mail und Code an - dann " +
+                "bleibt die Anmeldung im Programm erhalten.\r\n\r\n" +
+                "Trotzdem im Browser oeffnen? (Die Anmeldung gilt dann nur dort, " +
+                "nicht in diesem Fenster.)",
+                "Anmeldung", MessageBoxButtons.YesNo, MessageBoxIcon.Information,
+                MessageBoxDefaultButton.Button2);
+
+            if (answer == DialogResult.Yes) { OpenExternally(uri); }
+            else { ShowChat(); }
+            return true;
         }
 
         private void OpenExternally(string url)
@@ -266,6 +290,7 @@ namespace AnycubicBridge
 
         private void UpdateStatus()
         {
+            if (showingChat) { statusLabel.Text = "Chat - dein Claude-Konto"; return; }
             statusLabel.Text = File.Exists(dataFile)
                 ? "Daten von " + File.GetLastWriteTime(dataFile).ToString("HH:mm:ss")
                 : "keine Daten";
@@ -288,7 +313,7 @@ namespace AnycubicBridge
                     {
                         t.Stop();
                         t.Dispose();
-                        if (webView != null && webView.CoreWebView2 != null)
+                        if (!showingChat && webView != null && webView.CoreWebView2 != null)
                         {
                             webView.CoreWebView2.Reload();
                         }
