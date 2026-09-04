@@ -1,0 +1,11 @@
+# Gebaute Dateien
+widget/dist/
+widget/*.zip
+
+# WebView2-Bibliotheken gehoeren Microsoft und werden beim Bauen geladen
+widget/lib/
+
+# Nutzerdaten und Testreste
+*.gcode
+*.png
+!docs/*.png
