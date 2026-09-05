@@ -275,11 +275,96 @@ namespace AnycubicBridge
                     BeginInvoke((MethodInvoker)delegate
                     {
                         if (webView == null || webView.CoreWebView2 == null) { return; }
-                        webView.CoreWebView2.PostWebMessageAsString("antwort:" + antwort);
+                        // Aus der Antwort eine eventuelle Aktion herausloesen -
+                        // sie wird nicht mitangezeigt, sondern nachgefragt.
+                        string rest = HandleActionLine(antwort);
+                        webView.CoreWebView2.PostWebMessageAsString("antwort:" + rest);
                     });
                 }
                 catch { }
             });
+        }
+
+        // Der Chat kann eine Aktion vorschlagen, indem er als letzte Zeile
+        //   AKTION: writeprofile | <Name> | key=wert;key=wert
+        // anhaengt. Ausgefuehrt wird sie erst nach Rueckfrage - der Chat
+        // schreibt nichts ungefragt in den Slicer.
+        private string HandleActionLine(string antwort)
+        {
+            if (antwort == null) { return ""; }
+            int pos = antwort.LastIndexOf("AKTION: writeprofile", StringComparison.OrdinalIgnoreCase);
+            if (pos < 0) { return antwort; }
+
+            string zeile = antwort.Substring(pos).Split('\n')[0].Trim();
+            string text = antwort.Substring(0, pos).TrimEnd();
+
+            string[] teile = zeile.Split('|');
+            if (teile.Length < 3)
+            {
+                return text + "\n\n(Eine Aktion war angehaengt, aber unvollstaendig - nichts geschrieben.)";
+            }
+            string name = teile[1].Trim();
+            string werte = teile[2].Trim();
+            if (name.Length == 0 || werte.Length == 0)
+            {
+                return text + "\n\n(Eine Aktion war angehaengt, aber unvollstaendig - nichts geschrieben.)";
+            }
+
+            DialogResult antwortDlg = MessageBox.Show(
+                "Profil \"" + name + "\" in Anycubic Slicer Next anlegen?\r\n\r\n" +
+                werte.Replace(";", "\r\n") + "\r\n\r\n" +
+                "Vorhandene Profile werden nicht veraendert. Danach muss das Profil im " +
+                "Slicer noch ausgewaehlt werden.",
+                "Werte uebernehmen", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+
+            if (antwortDlg != DialogResult.Yes)
+            {
+                return text + "\n\n(Nicht geschrieben - abgebrochen.)";
+            }
+
+            try
+            {
+                string ergebnis = RunBridge("writeprofile -ProfileName \"" + name +
+                                            "\" -Values \"" + werte + "\" -Force");
+                return text + "\n\n" + ergebnis;
+            }
+            catch (Exception ex)
+            {
+                return text + "\n\nSchreiben fehlgeschlagen: " + ex.Message;
+            }
+        }
+
+        private string RunBridge(string argumente)
+        {
+            string bridge = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "anycubic-bridge.ps1");
+            if (!File.Exists(bridge)) { throw new Exception("anycubic-bridge.ps1 nicht gefunden."); }
+
+            ProcessStartInfo psi = new ProcessStartInfo("powershell.exe");
+            psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + bridge + "\" " + argumente;
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            psi.StandardOutputEncoding = System.Text.Encoding.UTF8;
+
+            using (Process proc = new Process())
+            {
+                proc.StartInfo = psi;
+                System.Text.StringBuilder o = new System.Text.StringBuilder();
+                System.Text.StringBuilder err = new System.Text.StringBuilder();
+                proc.OutputDataReceived += delegate (object s, DataReceivedEventArgs a) { if (a.Data != null) { o.AppendLine(a.Data); } };
+                proc.ErrorDataReceived += delegate (object s, DataReceivedEventArgs a) { if (a.Data != null) { err.AppendLine(a.Data); } };
+                proc.Start();
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+                proc.WaitForExit(120000);
+
+                string ausgabe = o.ToString().Trim();
+                if (ausgabe.Length > 0) { return ausgabe; }
+                string fehler = err.ToString().Trim();
+                if (fehler.Length > 0) { throw new Exception(fehler); }
+                return "(keine Ausgabe)";
+            }
         }
 
         private void OnDashboardLoaded(object sender, CoreWebView2NavigationCompletedEventArgs e)

@@ -38,6 +38,9 @@ param(
     [string]$ModelPath,
     [string]$MachinePreset,
     [string]$ProfileName,
+    # Bestimmte Werte statt der automatischen Empfehlung, z. B.
+    # -Values "brim_type=outer_only;enable_support=1;sparse_infill_density=25%"
+    [string]$Values,
     [string]$OutFile,
     [string]$GcodeFile,
     [string]$AddModel,
@@ -1512,12 +1515,27 @@ switch ($Action) {
         }
         $configRoot = Get-AnycubicConfigRoot
         $mainConf = Read-AnycubicMainConf -ConfigRoot $configRoot
-        $resolvedModelPath = if ($ModelPath) { $ModelPath } else { Get-AnycubicActiveModelPath -MainConf $mainConf }
-        if (-not $resolvedModelPath) { throw "Kein Modell gefunden. Bitte -ModelPath angeben. [$AnycubicBridgeWatermark]" }
 
-        $triangles = Get-AnycubicMeshTriangles -Path $resolvedModelPath
-        $stats = Get-AnycubicMeshStats -Triangles $triangles -OverhangThreshold $OverhangThreshold
-        $rec = Get-AnycubicRecommendation -Stats $stats -OverhangThreshold $OverhangThreshold
+        # Mit -Values werden genau die angegebenen Werte geschrieben. Dann ist
+        # kein Modell noetig - die Werte kommen ja von aussen.
+        $rec = $null
+        if ($Values) {
+            $eigene = [ordered]@{}
+            foreach ($paar in ($Values -split ';')) {
+                if ($paar -notmatch '=') { continue }
+                $k = $paar.Substring(0, $paar.IndexOf('=')).Trim()
+                $v = $paar.Substring($paar.IndexOf('=') + 1).Trim()
+                if ($k) { $eigene[$k] = $v }
+            }
+            if ($eigene.Count -eq 0) { throw "-Values konnte nicht gelesen werden. Format: ""key=wert;key=wert"" [$AnycubicBridgeWatermark]" }
+            $rec = [pscustomobject]@{ Values = $eigene; Notes = @('Werte von Hand vorgegeben.') }
+        } else {
+            $resolvedModelPath = if ($ModelPath) { $ModelPath } else { Get-AnycubicActiveModelPath -MainConf $mainConf }
+            if (-not $resolvedModelPath) { throw "Kein Modell gefunden. Bitte -ModelPath oder -Values angeben. [$AnycubicBridgeWatermark]" }
+            $triangles = Get-AnycubicMeshTriangles -Path $resolvedModelPath
+            $stats = Get-AnycubicMeshStats -Triangles $triangles -OverhangThreshold $OverhangThreshold
+            $rec = Get-AnycubicRecommendation -Stats $stats -OverhangThreshold $OverhangThreshold
+        }
 
         $existingProfiles = Get-AnycubicProcessProfiles -ConfigRoot $configRoot
         if ($existingProfiles.Count -eq 0) {
