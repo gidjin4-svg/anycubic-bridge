@@ -313,8 +313,10 @@ namespace AnycubicBridge
             DialogResult antwortDlg = MessageBox.Show(
                 "Profil \"" + name + "\" in Anycubic Slicer Next anlegen?\r\n\r\n" +
                 werte.Replace(";", "\r\n") + "\r\n\r\n" +
-                "Vorhandene Profile werden nicht veraendert. Danach muss das Profil im " +
-                "Slicer noch ausgewaehlt werden.",
+                "Vorhandene Profile werden nicht veraendert.\r\n\r\n" +
+                "WICHTIG: Anycubic Slicer Next liest Profile nur beim Start ein. " +
+                "Das neue Profil erscheint erst nach einem Neustart des Slicers - " +
+                "dann im Prozess-Dropdown auswaehlen.",
                 "Werte uebernehmen", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
 
             if (antwortDlg != DialogResult.Yes)

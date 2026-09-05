@@ -32,7 +32,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('about', 'status', 'listprofiles', 'analyze', 'recommend', 'writeprofile', 'preview', 'dashboard', 'watch', 'colorchange', 'extrude', 'merge')]
+    [ValidateSet('about', 'status', 'listprofiles', 'analyze', 'recommend', 'writeprofile', 'preview', 'dashboard', 'watch', 'colorchange', 'extrude', 'merge', 'slice')]
     [string]$Action,
 
     [string]$ModelPath,
@@ -1413,6 +1413,109 @@ switch ($Action) {
         "Fuer den Farbwechsel: das aufgesetzte Objekt beginnt bei Z = $changeZ mm."
         "Nach dem Slicen:"
         "  .\anycubic-bridge.ps1 colorchange -GcodeFile <datei.gcode> -AtHeight $changeZ -OutFile <zweifarbig.gcode> -Force"
+    }
+
+    'slice' {
+        # Slict direkt ueber die Kommandozeile des Slicers - ohne Oberflaeche,
+        # ohne Profil anzulegen, ohne Neustart. Damit wirken vorgegebene Werte
+        # sofort, statt erst nach Profilwahl im Programm.
+        $installRoot = Get-AnycubicInstallRoot
+        $exe = Join-Path $installRoot 'AnycubicSlicerNext.exe'
+        if (-not (Test-Path -LiteralPath $exe)) { throw "Slicer nicht gefunden: $exe [$AnycubicBridgeWatermark]" }
+
+        $configRoot = Get-AnycubicConfigRoot
+        $mainConf = Read-AnycubicMainConf -ConfigRoot $configRoot
+        $maschine = if ($MachinePreset) { $MachinePreset } else { $mainConf.presets.machine }
+
+        # Modell: Vorgabe, sonst die Projektdatei der laufenden Sitzung.
+        $quelle = $ModelPath
+        if (-not $quelle) {
+            $sess = Get-AnycubicSessionDir
+            if ($sess) {
+                $origin = Join-Path $sess.FullName 'origin.txt'
+                if (Test-Path -LiteralPath $origin) {
+                    $p = (Get-Content -LiteralPath $origin -Raw).Trim()
+                    if ($p -and (Test-Path -LiteralPath $p)) { $quelle = $p }
+                }
+            }
+        }
+        if (-not $quelle) { throw "Keine Modelldatei. Bitte -ModelPath angeben (die Sitzung nennt keine Quelldatei). [$AnycubicBridgeWatermark]" }
+
+        $sys = Join-Path $configRoot 'system\Anycubic'
+        $machineJson = Join-Path $sys ('machine\' + $maschine + '.json')
+        if (-not (Test-Path -LiteralPath $machineJson)) { throw "Maschinenprofil nicht gefunden: $machineJson [$AnycubicBridgeWatermark]" }
+
+        # Prozessprofil: Standard der Maschine, bei Bedarf mit eigenen Werten.
+        $prozessName = '0.20mm Standard @' + $maschine
+        $prozessJson = Join-Path $sys ('process\' + $prozessName + '.json')
+        if (-not (Test-Path -LiteralPath $prozessJson)) { throw "Prozessprofil nicht gefunden: $prozessJson [$AnycubicBridgeWatermark]" }
+
+        $tempDir = Join-Path $env:TEMP ('anycubic-bridge-slice-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+        [void](New-Item -ItemType Directory -Path $tempDir -Force)
+
+        if ($Values) {
+            # Eigene Werte als abgeleitetes Profil daneben legen. Das Original
+            # bleibt unangetastet, und es landet nichts in der Slicer-Konfig.
+            $eigene = [ordered]@{}
+            foreach ($paar in ($Values -split ';')) {
+                if ($paar -notmatch '=') { continue }
+                $k = $paar.Substring(0, $paar.IndexOf('=')).Trim()
+                $v = $paar.Substring($paar.IndexOf('=') + 1).Trim()
+                if ($k) { $eigene[$k] = $v }
+            }
+            $basis = Get-Content -LiteralPath $prozessJson -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($k in $eigene.Keys) {
+                $basis | Add-Member -NotePropertyName $k -NotePropertyValue ([string]$eigene[$k]) -Force
+            }
+            $basis | Add-Member -NotePropertyName 'name' -NotePropertyValue 'Bridge Slice' -Force
+            $basis | Add-Member -NotePropertyName 'print_settings_id' -NotePropertyValue 'Bridge Slice' -Force
+            $prozessJson = Join-Path $tempDir 'process.json'
+            Write-AnycubicBridgeTextFile -Path $prozessJson -Text ($basis | ConvertTo-Json -Depth 8)
+            "Eigene Werte: " + (($eigene.Keys | ForEach-Object { "$_=$($eigene[$_])" }) -join ', ')
+        }
+
+        # Filament: erstes passendes des Druckers.
+        $filamentJson = Get-ChildItem -LiteralPath (Join-Path $sys 'filament') -Filter ('*PLA @' + $maschine + '.json') -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $filamentJson) {
+            $filamentJson = Get-ChildItem -LiteralPath (Join-Path $sys 'filament') -Filter '*PLA*' | Select-Object -First 1
+        }
+
+        $ziel = if ($OutFile) { Split-Path -Parent $OutFile } else { $tempDir }
+        if (-not $ziel) { $ziel = $tempDir }
+        if (-not (Test-Path -LiteralPath $ziel)) { [void](New-Item -ItemType Directory -Path $ziel -Force) }
+
+        $argLine = '--slice 0 --datadir "' + $configRoot + '" --load-settings "' + $machineJson + ';' + $prozessJson +
+                   '" --load-filaments "' + $filamentJson.FullName + '" --outputdir "' + $ziel + '" "' + $quelle + '"'
+
+        "Slicen: $([System.IO.Path]::GetFileName($quelle))  ->  $ziel"
+        $logOut = Join-Path $tempDir 'out.txt'
+        $logErr = Join-Path $tempDir 'err.txt'
+        $proc = Start-Process -FilePath $exe -PassThru -NoNewWindow -RedirectStandardOutput $logOut -RedirectStandardError $logErr -ArgumentList $argLine
+        if (-not $proc.WaitForExit(600000)) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw "Slicen hat zu lange gedauert und wurde abgebrochen. [$AnycubicBridgeWatermark]"
+        }
+
+        $gcode = Get-ChildItem -LiteralPath $ziel -Filter '*.gcode' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $gcode) {
+            $fehler = if (Test-Path -LiteralPath $logErr) { (Get-Content -LiteralPath $logErr -Raw).Trim() } else { '' }
+            if (-not $fehler -and (Test-Path -LiteralPath $logOut)) { $fehler = (Get-Content -LiteralPath $logOut -Tail 5) -join ' ' }
+            throw "Kein G-Code entstanden. $fehler [$AnycubicBridgeWatermark]"
+        }
+
+        if ($OutFile -and $gcode.FullName -ne $OutFile) {
+            Move-Item -LiteralPath $gcode.FullName -Destination $OutFile -Force
+            $gcode = Get-Item -LiteralPath $OutFile
+        }
+
+        $stats = Get-AnycubicGcodeStats -Path $gcode.FullName
+        "Fertig: $($gcode.FullName)"
+        if ($stats) {
+            "Dauer:    $($stats.duration)"
+            "Filament: $($stats.filamentGram) g / $($stats.filamentMeter) m" + $(if ($stats.costEuro -ne $null) { ", $($stats.costEuro) EUR" } else { '' })
+            "Schichten: $($stats.layers)"
+        }
+        "[$AnycubicBridgeWatermark]"
     }
 
     'colorchange' {
