@@ -855,6 +855,15 @@
   renderModel();
   updateChatAvailability();
 
+  // Das Programm schiebt neue Daten direkt hier rein, statt die Seite neu zu
+  // laden - eine Datei ueber file:// landet sonst im Zwischenspeicher und die
+  // Anzeige bleibt auf altem Stand stehen.
+  window.bridgeRefresh = function () {
+    state.data = window.BRIDGE_DATA || null;
+    renderModel();
+    if (state.data) { setLive(true, 'lokal'); } else { setLive(false, 'keine Daten'); }
+  };
+
   // Lokaler Modus: die Bridge legt dashboard-data.js neben diese Datei; dann
   // braucht die Anzeige weder Datenbank noch Claude-Kontext.
   function bootLocal() {
@@ -868,11 +877,8 @@
     setFooter('liest dashboard-data.js');
     seedGreeting();
 
-    // Im lokalen Modus gibt es keinen Chatverlauf, der verloren gehen koennte -
-    // deshalb reicht ein schlichtes Neuladen, um neue Bridge-Daten zu sehen.
-    if (window.location.protocol === 'file:') {
-      setInterval(function () { window.location.reload(); }, 30000);
-    }
+    // Kein Neuladen mehr: das Programm reicht neue Daten aktiv herein
+    // (siehe window.bridgeRefresh). So bleibt auch ein laufender Chat stehen.
   }
 
   async function boot() {

@@ -22,6 +22,11 @@ $dist = Join-Path $here 'dist'
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if (-not (Test-Path -LiteralPath $csc)) { throw "C#-Compiler nicht gefunden: $csc" }
 
+# Laeuft das Programm noch, ist die Datei gesperrt - dann lieber klar sagen
+# was zu tun ist, statt mit einem Zugriffsfehler abzubrechen.
+if (Get-Process -Name 'Druckbett-Monitor' -ErrorAction SilentlyContinue) {
+    throw "Druckbett-Monitor laeuft gerade und blockiert die Datei. Bitte das Fenster schliessen und nochmal bauen."
+}
 if (Test-Path -LiteralPath $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 

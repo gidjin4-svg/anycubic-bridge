@@ -92,7 +92,7 @@ namespace AnycubicBridge
             bar.BackColor = Color.FromArgb(238, 241, 244);
 
             dashboardButton = MakeButton("Aktualisieren", 6);
-            dashboardButton.Click += delegate { ShowDashboard(); };
+            dashboardButton.Click += delegate { RefreshNow(); };
             bar.Controls.Add(dashboardButton);
 
             // Der Chat sitzt in der Anzeige selbst, sobald Claude Code da ist.
@@ -282,6 +282,61 @@ namespace AnycubicBridge
             });
         }
 
+        private void OnDashboardLoaded(object sender, CoreWebView2NavigationCompletedEventArgs e)
+        {
+            webView.CoreWebView2.NavigationCompleted -= OnDashboardLoaded;
+            PushDataToPage();
+        }
+
+        // Daten aktiv in die Seite reichen. Ueber file:// wuerde ein Neuladen
+        // die Datendatei aus dem Zwischenspeicher holen und die Anzeige bliebe
+        // auf altem Stand - genau deshalb half vorher nur ein Neustart.
+        private void PushDataToPage()
+        {
+            if (webView == null || webView.CoreWebView2 == null) { return; }
+            if (!File.Exists(dataFile)) { return; }
+            try
+            {
+                string js = File.ReadAllText(dataFile);
+                if (js.Length > 0 && js[0] == '﻿') { js = js.Substring(1); }
+                webView.CoreWebView2.ExecuteScriptAsync(
+                    js + "\nif (window.bridgeRefresh) { window.bridgeRefresh(); }");
+            }
+            catch { }
+        }
+
+        // Die Bridge einmal laufen lassen und danach die Anzeige auffrischen.
+        private void RefreshNow()
+        {
+            string bridge = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "anycubic-bridge.ps1");
+            if (!File.Exists(bridge)) { PushDataToPage(); return; }
+
+            statusLabel.Text = "aktualisiere...";
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo("powershell.exe");
+                    psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + bridge +
+                                    "\" dashboard -OutFile \"" + dataFile + "\"";
+                    psi.UseShellExecute = false;
+                    psi.CreateNoWindow = true;
+                    using (Process p = Process.Start(psi)) { p.WaitForExit(120000); }
+                }
+                catch { }
+
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        PushDataToPage();
+                        UpdateStatus();
+                    });
+                }
+                catch { }
+            });
+        }
+
         private void ShowDashboard()
         {
             showingChat = false;
@@ -296,6 +351,8 @@ namespace AnycubicBridge
             else
             {
                 webView.CoreWebView2.Navigate(new Uri(monitorPath).AbsoluteUri);
+                // Nach dem Laden die aktuellen Daten reinreichen.
+                webView.CoreWebView2.NavigationCompleted += OnDashboardLoaded;
             }
             UpdateStatus();
         }
@@ -479,10 +536,7 @@ namespace AnycubicBridge
                     {
                         t.Stop();
                         t.Dispose();
-                        if (!showingChat && webView != null && webView.CoreWebView2 != null)
-                        {
-                            webView.CoreWebView2.Reload();
-                        }
+                        PushDataToPage();
                         UpdateStatus();
                     };
                     t.Start();
