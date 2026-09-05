@@ -61,7 +61,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $AnycubicBridgeName = 'Anycubic Bridge'
-$AnycubicBridgeVersion = '0.1.0'
+$AnycubicBridgeVersion = '0.2.1'
 $AnycubicBridgeWatermark = 'AnycubicBridge'
 
 # --------------------------------------------------------------------
@@ -109,6 +109,91 @@ function Get-AnycubicSessionDir {
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
 }
 
+function Get-AnycubicActiveCombo {
+    <#
+      Die aktive Kombination aus Drucker, Filament und Prozessprofil.
+
+      Wichtig: NICHT aus presets.filaments lesen - das ist eine Restehalde aus
+      Nullen und Leerstrings und ergibt in der Anzeige nur "{0, , 0, ...}".
+      Massgeblich ist der Eintrag in anycubic_presets, dessen machine zum
+      aktiven Drucker (presets.machine) passt.
+    #>
+    param($MainConf)
+
+    $maschine = [string]$MainConf.presets.machine
+    $treffer = $null
+    if ($MainConf.anycubic_presets) {
+        $treffer = $MainConf.anycubic_presets |
+            Where-Object { [string]$_.machine -eq $maschine } | Select-Object -First 1
+    }
+    return [pscustomobject]@{
+        Maschine = $(if ($maschine) { $maschine } else { '(unbekannt)' })
+        Filament = $(if ($treffer -and $treffer.filament) { [string]$treffer.filament } else { '(unbekannt)' })
+        Prozess  = $(if ($treffer -and $treffer.process) { [string]$treffer.process } else { '(unbekannt)' })
+    }
+}
+
+function Get-AnycubicOpenProjectName {
+    <#
+      Der Fenstertitel nennt das geladene Projekt sofort - lange bevor der
+      Slicer seine Sitzungsdatei schreibt (die entsteht erst beim Speichern
+      oder Schneiden, nicht beim Laden). Format: "<Projekt>(Modus)", davor
+      ein "*" wenn ungespeichert. Ohne Projekt steht dort nur der Programmname.
+      Rueckgabe: Projektname oder $null.
+    #>
+    $proc = Get-Process -Name '*AnycubicSlicerNext*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowTitle } | Select-Object -First 1
+    if (-not $proc) { return $null }
+
+    $titel = $proc.MainWindowTitle
+    # Der Klammerzusatz kommt je nach Sprachpaket mit normalen oder mit
+    # fernoestlichen Vollbreiten-Klammern.
+    $i = $titel.IndexOfAny([char[]]@('(', [char]0xFF08))
+    if ($i -gt 0) { $titel = $titel.Substring(0, $i) }
+    $titel = $titel.Trim().TrimStart('*').Trim()
+
+    if (-not $titel) { return $null }
+    if ($titel -eq 'AnycubicSlicerNext') { return $null }
+    return $titel
+}
+
+function Resolve-AnycubicProjectFile {
+    <#
+      Sucht zu einem Projektnamen aus dem Fenstertitel die zugehoerige Datei:
+      erst unter den zuletzt geoeffneten Projekten, dann in deren Ordnern,
+      zuletzt im Desktop. Rueckgabe: Pfad oder $null.
+    #>
+    param($MainConf, [string]$Name)
+    if (-not $Name) { return $null }
+
+    $ordner = New-Object System.Collections.Generic.List[string]
+    if ($MainConf -and $MainConf.recent_projects) {
+        foreach ($k in ($MainConf.recent_projects.PSObject.Properties.Name | Sort-Object)) {
+            $p = $MainConf.recent_projects.$k
+            if (-not $p) { continue }
+            if ((Test-Path -LiteralPath $p) -and
+                ([System.IO.Path]::GetFileNameWithoutExtension($p) -eq $Name)) {
+                return (Resolve-Path -LiteralPath $p).Path
+            }
+            $d = [System.IO.Path]::GetDirectoryName($p)
+            if ($d) { $ordner.Add($d) }
+        }
+    }
+    if ($MainConf -and $MainConf.recent -and $MainConf.recent.last_opened_folder) {
+        $ordner.Add([string]$MainConf.recent.last_opened_folder)
+    }
+    $ordner.Add([Environment]::GetFolderPath('Desktop'))
+
+    foreach ($d in ($ordner | Select-Object -Unique)) {
+        if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
+        foreach ($ext in @('.3mf', '.stl')) {
+            $kandidat = Join-Path $d ($Name + $ext)
+            if (Test-Path -LiteralPath $kandidat) { return (Resolve-Path -LiteralPath $kandidat).Path }
+        }
+    }
+    return $null
+}
+
 function Get-AnycubicPlate {
     <#
       Was JETZT auf dem Druckbett liegt - nicht was zuletzt geoeffnet wurde.
@@ -139,6 +224,22 @@ function Get-AnycubicPlate {
                     Name      = ($f.Name -replace '_\d+\.model$', '')
                     Transform = $null
                 })
+            }
+        }
+        if ($result.Count -gt 0) { return $result }
+
+        # Auch die Objektdateien fehlen. Das ist der Normalfall direkt nach dem
+        # Laden: der Slicer legt beides erst beim Speichern oder Schneiden an.
+        # Der Fenstertitel weiss es aber sofort - darueber die Datei suchen.
+        # Bleibt ehrlich: nennt der Titel kein Projekt, ist das Bett wirklich
+        # leer, und es wird nichts geraten.
+        $offen = Get-AnycubicOpenProjectName
+        if ($offen) {
+            $conf = $null
+            try { $conf = Read-AnycubicMainConf -ConfigRoot (Get-AnycubicConfigRoot) } catch { }
+            $datei = Resolve-AnycubicProjectFile -MainConf $conf -Name $offen
+            if ($datei) {
+                $result.Add([pscustomobject]@{ File = $datei; Name = $offen; Transform = $null })
             }
         }
         return $result
@@ -296,6 +397,7 @@ function Convert-AnycubicMfPoint {
 
 function Get-AnycubicMeshFrom3mf {
     param([string]$Path)
+    $externeTeile = @{}   # Eintragsname -> XML-Text der ausgelagerten Geometrie
     $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
     try {
         # Normale 3MF-Dateien haben 3D/3dmodel.model. Die Sitzungsdateien des
@@ -310,6 +412,24 @@ function Get-AnycubicMeshFrom3mf {
         $reader = New-Object System.IO.StreamReader($stream)
         $xmlText = $reader.ReadToEnd()
         $reader.Close(); $stream.Close()
+
+        # 3MF-Production-Erweiterung: dann steht in 3dmodel.model nur noch ein
+        # Verweis (p:path) auf einen eigenen Eintrag mit der Geometrie. Genau so
+        # speichert Anycubic Slicer Next seine Projekte - ohne das hier kommt
+        # ein leeres Modell heraus (0 Dreiecke, Masse -unendlich).
+        # Achtung: die Objekt-IDs stimmen zwischen beiden Dateien NICHT ueberein
+        # (aussen id="2", innen id="1"), die Zuordnung laeuft allein ueber den
+        # Pfad. Deshalb pro Verweis merken statt IDs zusammenzuwerfen.
+        foreach ($m in [regex]::Matches($xmlText, 'p:path\s*=\s*"([^"]+)"')) {
+            $rel = $m.Groups[1].Value.TrimStart('/')
+            if ($externeTeile.ContainsKey($rel)) { continue }
+            $ref = $zip.Entries | Where-Object { $_.FullName -eq $rel } | Select-Object -First 1
+            if (-not $ref) { continue }
+            $s2 = $ref.Open()
+            $r2 = New-Object System.IO.StreamReader($s2)
+            $externeTeile[$rel] = $r2.ReadToEnd()
+            $r2.Close(); $s2.Close()
+        }
     } finally {
         $zip.Dispose()
     }
@@ -331,6 +451,36 @@ function Get-AnycubicMeshFrom3mf {
         if ($vNodes.Count -eq 0) { $vNodes = $obj.SelectNodes('.//vertices/vertex') }
         $tNodes = $obj.SelectNodes('.//m:triangles/m:triangle', $ns)
         if ($tNodes.Count -eq 0) { $tNodes = $obj.SelectNodes('.//triangles/triangle') }
+
+        # Leeres Objekt mit p:path: die Geometrie liegt im verwiesenen Eintrag.
+        # Dessen eigene Objekt-ID ist eine andere - es zaehlt der Pfad, und die
+        # Punkte werden unter der AEUSSEREN ID abgelegt, denn nur die steht im
+        # <build>-Abschnitt.
+        if ($vNodes.Count -eq 0) {
+            $pfad = $obj.GetAttribute('path', 'http://schemas.microsoft.com/3dmanufacturing/production/2015/06')
+            if ($pfad) { $pfad = $pfad.TrimStart('/') } else { $pfad = $null }
+            # Notnagel: liegt genau ein ausgelagertes Teil vor, ist die
+            # Zuordnung eindeutig, auch wenn das Attribut anders benannt ist.
+            if (-not $pfad -and $externeTeile.Count -eq 1) {
+                $pfad = @($externeTeile.Keys)[0]
+            }
+            if ($pfad -and $externeTeile.ContainsKey($pfad)) {
+                [xml]$teil = $externeTeile[$pfad]
+                $tns = New-Object System.Xml.XmlNamespaceManager($teil.NameTable)
+                $tns.AddNamespace('m', 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02')
+                $inner = $teil.SelectNodes('//m:resources/m:object', $tns)
+                if ($inner.Count -eq 0) { $inner = $teil.SelectNodes('//resources/object') }
+                foreach ($io in $inner) {
+                    $iv = $io.SelectNodes('.//m:vertices/m:vertex', $tns)
+                    if ($iv.Count -eq 0) { $iv = $io.SelectNodes('.//vertices/vertex') }
+                    if ($iv.Count -eq 0) { continue }
+                    $it = $io.SelectNodes('.//m:triangles/m:triangle', $tns)
+                    if ($it.Count -eq 0) { $it = $io.SelectNodes('.//triangles/triangle') }
+                    $vNodes = $iv; $tNodes = $it
+                    break
+                }
+            }
+        }
 
         $verts = New-Object System.Collections.Generic.List[object]
         foreach ($v in $vNodes) {
@@ -849,23 +999,26 @@ function Write-Anycubic3mf {
 
 function Get-AnycubicTopFaces {
     <#
-      Nur die nach oben zeigenden Dreiecke nahe der Oberkante. Damit werden die
-      Flaechenabfragen um Groessenordnungen schneller, weil nicht das ganze
-      Mesh durchsucht werden muss.
-    #>
-    param($Triangles, [double]$Tolerance = 0.5)
+      Alle nach oben zeigenden Dreiecke - das sind die Flaechen, auf denen
+      etwas aufliegen kann.
 
-    $maxZ = [double]::MinValue
-    foreach ($t in $Triangles) { foreach ($v in $t) { if ($v[2] -gt $maxZ) { $maxZ = $v[2] } } }
+      Frueher blieben hier nur die Dreiecke dicht an der HOECHSTEN Stelle des
+      Modells uebrig. Das ging so lange gut, wie die Oberseite auch die
+      groesste Flaeche war. Bei der Deckenhalterung ist es umgekehrt: oben
+      sitzen vier kleine Erhebungen, die grosse ebene Flaeche liegt 10 mm
+      tiefer - und wurde dadurch weggeworfen, worauf merge behauptete, es gebe
+      ueberhaupt keine ebene Flaeche. Die Auswahl der besten Stelle trifft
+      Find-AnycubicPlacement, das hohe Lagen ohnehin bevorzugt; hier zu
+      filtern nimmt ihm nur die Auswahl weg.
+    #>
+    param($Triangles)
 
     $faces = New-Object System.Collections.Generic.List[object]
     foreach ($t in $Triangles) {
-        $e1x = $t[1][0] - $t[0][0]; $e1y = $t[1][1] - $t[0][1]; $e1z = $t[1][2] - $t[0][2]
-        $e2x = $t[2][0] - $t[0][0]; $e2y = $t[2][1] - $t[0][1]; $e2z = $t[2][2] - $t[0][2]
+        $e1x = $t[1][0] - $t[0][0]; $e1y = $t[1][1] - $t[0][1]
+        $e2x = $t[2][0] - $t[0][0]; $e2y = $t[2][1] - $t[0][1]
         $nz = $e1x * $e2y - $e1y * $e2x
         if ($nz -le 0) { continue }   # zeigt nicht nach oben
-        $tMax = [Math]::Max($t[0][2], [Math]::Max($t[1][2], $t[2][2]))
-        if ($tMax -lt ($maxZ - $Tolerance)) { continue }
         $faces.Add($t)
     }
     return $faces
@@ -1257,13 +1410,15 @@ switch ($Action) {
         $configRoot = Get-AnycubicConfigRoot
         $mainConf = Read-AnycubicMainConf -ConfigRoot $configRoot
         $resolvedModelPath = if ($ModelPath) { $ModelPath } else { Get-AnycubicActiveModelPath -MainConf $mainConf }
+        $aktiv = Get-AnycubicActiveCombo -MainConf $mainConf
         [pscustomobject]@{
             Tool             = "$AnycubicBridgeName $AnycubicBridgeVersion"
             Watermark        = $AnycubicBridgeWatermark
             ConfigRoot       = $configRoot
             AktuellesModell  = $resolvedModelPath
-            AktiveMaschine   = $mainConf.presets.machine
-            AktivesFilament  = $mainConf.presets.filaments
+            AktiveMaschine   = $aktiv.Maschine
+            AktivesFilament  = $aktiv.Filament
+            AktivesProfil    = $aktiv.Prozess
         } | Format-List
     }
 
@@ -1453,6 +1608,8 @@ switch ($Action) {
         $tempDir = Join-Path $env:TEMP ('anycubic-bridge-slice-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
         [void](New-Item -ItemType Directory -Path $tempDir -Force)
 
+        # Werte aufteilen: was zum Filament gehoert, muss ins Filamentprofil.
+        $filamentEigene = [ordered]@{}
         if ($Values) {
             # Eigene Werte als abgeleitetes Profil daneben legen. Das Original
             # bleibt unangetastet, und es landet nichts in der Slicer-Konfig.
@@ -1461,8 +1618,22 @@ switch ($Action) {
                 if ($paar -notmatch '=') { continue }
                 $k = $paar.Substring(0, $paar.IndexOf('=')).Trim()
                 $v = $paar.Substring($paar.IndexOf('=') + 1).Trim()
-                if ($k) { $eigene[$k] = $v }
+                if (-not $k) { continue }
+                # Kuehlung und Luefter sitzen bei OrcaSlicer ebenfalls im
+                # Filamentprofil. Im Prozessprofil werden sie stillschweigend
+                # ignoriert - der Wert steht dann drin und wirkt trotzdem nicht.
+                $istFilament = ($k -like 'filament_*' -or $k -like 'nozzle_temperature*' -or
+                    $k -like 'hot_plate_temp*' -or $k -like '*fan_speed*' -or
+                    $k -in @('slow_down_layer_time','slow_down_min_speed','slow_down_for_layer_cooling',
+                             'fan_cooling_layer_time','close_fan_the_first_x_layers','full_fan_speed_layer',
+                             'enable_overhang_bridge_fan','overhang_fan_threshold','reduce_fan_stop_start_freq'))
+                if ($istFilament) {
+                    $filamentEigene[$k] = $v
+                } else {
+                    $eigene[$k] = $v
+                }
             }
+            if ($eigene.Count -gt 0) {
             $basis = Get-Content -LiteralPath $prozessJson -Raw -Encoding UTF8 | ConvertFrom-Json
             foreach ($k in $eigene.Keys) {
                 $basis | Add-Member -NotePropertyName $k -NotePropertyValue ([string]$eigene[$k]) -Force
@@ -1472,6 +1643,7 @@ switch ($Action) {
             $prozessJson = Join-Path $tempDir 'process.json'
             Write-AnycubicBridgeTextFile -Path $prozessJson -Text ($basis | ConvertTo-Json -Depth 8)
             "Eigene Werte: " + (($eigene.Keys | ForEach-Object { "$_=$($eigene[$_])" }) -join ', ')
+            }
         }
 
         # Filament: erstes passendes des Druckers.
@@ -1479,13 +1651,31 @@ switch ($Action) {
         if (-not $filamentJson) {
             $filamentJson = Get-ChildItem -LiteralPath (Join-Path $sys 'filament') -Filter '*PLA*' | Select-Object -First 1
         }
+        $filamentPfad = $filamentJson.FullName
+
+        # Filament-Einstellungen gehoeren ins Filamentprofil, nicht ins
+        # Prozessprofil - dort werden sie stillschweigend ignoriert.
+        if ($filamentEigene -and $filamentEigene.Count -gt 0) {
+            $fbasis = Get-Content -LiteralPath $filamentPfad -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($k in $filamentEigene.Keys) {
+                # Einige Filamentwerte sind Listen (ein Eintrag je Extruder).
+                $alt = $fbasis.$k
+                $neu = if ($alt -is [array]) { ,@([string]$filamentEigene[$k]) } else { [string]$filamentEigene[$k] }
+                $fbasis | Add-Member -NotePropertyName $k -NotePropertyValue $neu -Force
+            }
+            $fbasis | Add-Member -NotePropertyName 'name' -NotePropertyValue 'Bridge Filament' -Force
+            $fbasis | Add-Member -NotePropertyName 'filament_settings_id' -NotePropertyValue 'Bridge Filament' -Force
+            $filamentPfad = Join-Path $tempDir 'filament.json'
+            Write-AnycubicBridgeTextFile -Path $filamentPfad -Text ($fbasis | ConvertTo-Json -Depth 8)
+            "Filament-Werte: " + (($filamentEigene.Keys | ForEach-Object { "$_=$($filamentEigene[$_])" }) -join ', ')
+        }
 
         $ziel = if ($OutFile) { Split-Path -Parent $OutFile } else { $tempDir }
         if (-not $ziel) { $ziel = $tempDir }
         if (-not (Test-Path -LiteralPath $ziel)) { [void](New-Item -ItemType Directory -Path $ziel -Force) }
 
         $argLine = '--slice 0 --datadir "' + $configRoot + '" --load-settings "' + $machineJson + ';' + $prozessJson +
-                   '" --load-filaments "' + $filamentJson.FullName + '" --outputdir "' + $ziel + '" "' + $quelle + '"'
+                   '" --load-filaments "' + $filamentPfad + '" --outputdir "' + $ziel + '" "' + $quelle + '"'
 
         "Slicen: $([System.IO.Path]::GetFileName($quelle))  ->  $ziel"
         $logOut = Join-Path $tempDir 'out.txt'

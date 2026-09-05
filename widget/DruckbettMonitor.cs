@@ -32,6 +32,7 @@ namespace AnycubicBridge
         private readonly string monitorPath;
         private readonly string dataFile;
         private readonly string settingsPath;
+        private readonly string chatsPath;
 
         // Kein fest eingebauter Link: der Chat laeuft ueber das EIGENE
         // Claude-Konto jedes Nutzers und dessen eigenes Artifact. Die Adresse
@@ -54,6 +55,7 @@ namespace AnycubicBridge
             monitorPath = Path.Combine(dataDir, "monitor.html");
             dataFile = Path.Combine(dataDir, "dashboard-data.js");
             settingsPath = Path.Combine(dataDir, "settings.json");
+            chatsPath = Path.Combine(dataDir, "chats.json");
             chatUrl = ReadChatUrl();
 
             Text = "Druckbett-Monitor";
@@ -258,6 +260,16 @@ namespace AnycubicBridge
             string raw;
             try { raw = e.TryGetWebMessageAsString(); }
             catch { return; }
+            // Verlauf sichern: die Anzeige schickt nach jedem Austausch den
+            // aktuellen Stand. Gespeichert werden die letzten fuenf Gespraeche,
+            // damit man nicht jedes Mal alles neu erklaeren muss.
+            if (raw != null && raw.StartsWith("verlauf:"))
+            {
+                try { File.WriteAllText(chatsPath, raw.Substring("verlauf:".Length)); }
+                catch { }
+                return;
+            }
+
             if (raw == null || !raw.StartsWith("frage:")) { return; }
 
             string frage = raw.Substring("frage:".Length);
@@ -384,10 +396,50 @@ namespace AnycubicBridge
             if (!File.Exists(dataFile)) { return; }
             try
             {
+                // Den Verlauf getrennt und nur einmal einspielen. Frueher hing er
+                // im selben Script wie die Messdaten - eine kaputte chats.json
+                // haette damit jede Aktualisierung mitgerissen, und der ganze
+                // Verlauf waere alle paar Sekunden neu durchgeschoben worden.
+                PushChatsOnce();
+
                 string js = File.ReadAllText(dataFile);
                 if (js.Length > 0 && js[0] == '﻿') { js = js.Substring(1); }
                 webView.CoreWebView2.ExecuteScriptAsync(
                     js + "\nif (window.bridgeRefresh) { window.bridgeRefresh(); }");
+            }
+            catch { }
+        }
+
+        // Gespeicherte Gespraeche in die Seite geben - einmal pro Programmstart.
+        // Danach fuehrt die Seite den Verlauf selbst und schickt ihn zurueck;
+        // ihn erneut hineinzureichen wuerde einen laufenden Chat ueberschreiben.
+        private bool chatsGesendet;
+
+        private void PushChatsOnce()
+        {
+            if (chatsGesendet) { return; }
+            chatsGesendet = true;
+            if (webView == null || webView.CoreWebView2 == null) { return; }
+
+            string verlauf = null;
+            if (File.Exists(chatsPath))
+            {
+                try { verlauf = File.ReadAllText(chatsPath); } catch { }
+            }
+            if (verlauf != null && verlauf.Length > 0 && verlauf[0] == '﻿') { verlauf = verlauf.Substring(1); }
+            if (verlauf == null) { return; }
+            verlauf = verlauf.Trim();
+            // Nur weiterreichen, was auch nach einer Liste aussieht. Kaputte oder
+            // halb geschriebene Dateien werden still verworfen statt die Seite
+            // mit einem Syntaxfehler lahmzulegen.
+            if (verlauf.Length < 2 || verlauf[0] != '[') { return; }
+
+            try
+            {
+                webView.CoreWebView2.ExecuteScriptAsync(
+                    "try { window.BRIDGE_CHATS = " + verlauf + ";" +
+                    " if (window.bridgeRefresh) { window.bridgeRefresh(); } }" +
+                    " catch (e) { window.BRIDGE_CHATS = null; }");
             }
             catch { }
         }

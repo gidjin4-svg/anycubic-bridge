@@ -27,6 +27,18 @@ if (-not (Test-Path -LiteralPath $csc)) { throw "C#-Compiler nicht gefunden: $cs
 if (Get-Process -Name 'Druckbett-Monitor' -ErrorAction SilentlyContinue) {
     throw "Druckbett-Monitor laeuft gerade und blockiert die Datei. Bitte das Fenster schliessen und nochmal bauen."
 }
+
+# Der Watcher laeuft als eigener PowerShell-Prozess auf der KOPIE in dist und
+# ueberlebt das Schliessen des Fensters. Laeuft er weiter, schreibt er die
+# Anzeigedaten munter mit dem alten Stand weiter - Aenderungen scheinen dann
+# wirkungslos, obwohl sie laengst drin sind. Genau darauf bin ich einmal
+# hereingefallen; deshalb hier hart beenden statt nur zu warnen.
+$altWatcher = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -match 'anycubic-bridge\.ps1"?\s+watch' })
+foreach ($w in $altWatcher) {
+    "Beende alten Watcher (PID $($w.ProcessId)) - er wuerde sonst mit dem alten Stand weiterschreiben."
+    Stop-Process -Id $w.ProcessId -Force -ErrorAction SilentlyContinue
+}
 if (Test-Path -LiteralPath $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 

@@ -414,6 +414,36 @@
     text-align: center;
     padding-top: 2px;
   }
+  /* Eigene Zeile mit Umbruch: die Knoepfe tragen die erste Frage als
+     Beschriftung und passen nebeneinander nicht in die schmale Spalte. */
+  .verlauf {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    margin: -2px 0 8px;
+  }
+  .verlauf:empty { display: none; }
+  .verlauf button {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10.5px;
+    padding: 1px 6px;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink-dim);
+    border-radius: 2px;
+    cursor: pointer;
+  }
+  .verlauf button.aktiv { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .verlauf button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
   .local-chat-note {
     margin: 0;
     font-size: 11.5px;
@@ -462,6 +492,7 @@
 
   <section class="card chat-card" id="chatCard">
     <h2>Chat</h2>
+    <div class="verlauf" id="verlauf"></div>
     <div class="chat-log" id="chatLog"></div>
     <div class="chat-input-row">
       <textarea id="chatInput" placeholder="Frag etwas zum aktuellen Modell oder Profil…" maxlength="2000"></textarea>
@@ -626,7 +657,12 @@
     els.chatLog.innerHTML = '';
     state.turns.forEach(function (t, i) {
       var isLastAssistantEmpty = t.role === 'assistant' && t.content === '' && i === state.turns.length - 1;
-      var b = bubble(t.role, isLastAssistantEmpty ? 'Denkt nach…' : t.content, isLastAssistantEmpty ? 'thinking' : (t.error ? 'error' : ''));
+      var wartetext = 'Denkt nach…';
+      if (isLastAssistantEmpty && t.wartet) {
+        wartetext = 'Denkt nach… ' + t.wartet + ' s';
+        if (t.wartet > 45) { wartetext += ' (laengere Antworten koennen 1-2 Minuten dauern)'; }
+      }
+      var b = bubble(t.role, isLastAssistantEmpty ? wartetext : t.content, isLastAssistantEmpty ? 'thinking' : (t.error ? 'error' : ''));
       els.chatLog.appendChild(b);
     });
     els.chatLog.scrollTop = els.chatLog.scrollHeight;
@@ -634,21 +670,26 @@
 
   var firstDataRendered = false;
 
-  function seedGreeting() {
+  function seedGreeting(erzwingen) {
     var d = state.data;
     var greeting;
+    var platzhalter = false;
     if (d && d.empty) {
       greeting = 'Gerade liegt nichts auf dem Bett. Lade ein Modell in Anycubic Slicer Next, dann kann ich dir dazu was sagen.';
     } else if (d) {
       greeting = (d.lastAction ? 'Zuletzt: ' + d.lastAction.what + '. ' : '')
         + 'Auf dem Bett liegt "' + d.model + '". Frag mich, warum die Werte so gesetzt sind — oder was du sonst wissen willst.';
     } else {
-      greeting = 'Noch keine Bridge-Analyse da. Lass "anycubic-bridge.ps1 recommend" einmal laufen, dann sag mir Bescheid.';
+      // Noch keine Messung eingetroffen. Das Fenster misst selbst, also hier
+      // NICHT dazu auffordern, von Hand ein Skript zu starten - das war eine
+      // Anweisung ins Leere und hat nur verwirrt.
+      greeting = 'Einen Moment, ich lese gerade das Druckbett aus…';
+      platzhalter = true;
     }
 
-    if (!firstDataRendered) {
+    if (erzwingen || !firstDataRendered) {
       // Erster echter Ladevorgang: Begruessung als einzige Nachricht setzen.
-      state.turns = [{ role: 'assistant', content: greeting }];
+      state.turns = [{ role: 'assistant', content: greeting, platzhalter: platzhalter }];
     } else if (d && state.turns.length > 0) {
       // Neue Bridge-Daten waehrend eines laufenden Chats: Verlauf NICHT loeschen,
       // nur kurz auf die Aktualisierung hinweisen.
@@ -790,16 +831,30 @@
     var d = state.data;
     var kontext = buildInstructionsTurn();
 
+    // Sichtbar mitzaehlen: sonst sieht "denkt nach" nach zehn Sekunden genauso
+    // aus wie nach zwei Minuten, und man weiss nicht ob noch was passiert.
+    var start = Date.now();
+    var ticker = setInterval(function () {
+      if (fertig) { clearInterval(ticker); return; }
+      var s = Math.round((Date.now() - start) / 1000);
+      state.turns[placeholderIndex].content = '';
+      state.turns[placeholderIndex].wartet = s;
+      renderChatLog();
+    }, 1000);
+
     var fertig = false;
     function abschluss(inhalt, istFehler) {
       if (fertig) return;
       fertig = true;
+      clearInterval(ticker);
+      state.turns[placeholderIndex].wartet = null;
       window.chrome.webview.removeEventListener('message', onAntwort);
       state.turns[placeholderIndex].content = inhalt;
       if (istFehler) { state.turns[placeholderIndex].error = true; }
       state.sending = false;
       els.sendBtn.disabled = false;
       renderChatLog();
+      verlaufSichern();
     }
 
     function onAntwort(e) {
@@ -872,10 +927,129 @@
   // Das Programm schiebt neue Daten direkt hier rein, statt die Seite neu zu
   // laden - eine Datei ueber file:// landet sonst im Zwischenspeicher und die
   // Anzeige bleibt auf altem Stand stehen.
+  // --- Verlauf ---------------------------------------------------------
+  // Die letzten fuenf Gespraeche bleiben erhalten, damit man nicht bei jedem
+  // Start alles neu erklaeren muss. Gespeichert wird vom Programm, nicht im
+  // Browser-Speicher - der ist bei file:// nicht verlaesslich.
+  var MAX_CHATS = 5;
+  var chats = [];       // [{ zeit, turns }], neuestes zuerst
+  var aktiverChat = 0;
+
+  // Zaehlt nur, was du wirklich gefragt hast. Die Begruessung steht in jedem
+  // Gespraech und macht ein leeres noch nicht zu einem benutzten.
+  function echteTurns(turns) {
+    if (!turns) return 0;
+    var n = 0;
+    for (var i = 0; i < turns.length; i++) { if (turns[i].role === 'user') n++; }
+    return n;
+  }
+
+  function verlaufSichern() {
+    if (!hostChat()) return;
+    if (!chats[aktiverChat]) { chats[aktiverChat] = { zeit: Date.now(), turns: [] }; }
+    chats[aktiverChat].turns = state.turns;
+    chats[aktiverChat].zeit = Date.now();
+    chats = chats.slice(0, MAX_CHATS);
+    try { window.chrome.webview.postMessage('verlauf:' + JSON.stringify(chats)); } catch (e) {}
+    renderVerlauf();
+  }
+
+  function chatOeffnen(i) {
+    aktiverChat = i;
+    state.turns = (chats[i] && chats[i].turns) ? chats[i].turns : [];
+    if (state.turns.length === 0) { seedGreeting(true); }
+    renderChatLog();
+    renderVerlauf();
+  }
+
+  function neuerChat() {
+    // Ist das aktuelle Gespraech noch leer, ist es bereits das neue. Sonst
+    // wuerden mehrere Klicks leere Eintraege stapeln und die echten aus den
+    // fuenf Plaetzen schieben.
+    var jetzt = chats[aktiverChat];
+    if (jetzt && echteTurns(jetzt.turns) === 0) {
+      aktiverChat = 0;
+      chats.splice(chats.indexOf(jetzt), 1);
+      chats.unshift(jetzt);
+      state.turns = jetzt.turns;
+      renderChatLog();
+      renderVerlauf();
+      return;
+    }
+    chats.unshift({ zeit: Date.now(), turns: [] });
+    chats = chats.slice(0, MAX_CHATS);
+    aktiverChat = 0;
+    state.turns = [];
+    seedGreeting(true);
+    verlaufSichern();
+  }
+
+  function renderVerlauf() {
+    var el = document.getElementById('verlauf');
+    if (!el) return;
+    el.innerHTML = '';
+    if (!hostChat()) return;
+
+    for (var i = 0; i < chats.length && i < MAX_CHATS; i++) {
+      (function (idx) {
+        var b = document.createElement('button');
+        var d = new Date(chats[idx].zeit || Date.now());
+        var uhr = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+        // Die erste eigene Frage als Beschriftung - eine reine Uhrzeit sagt
+        // nicht, welches Gespraech das war.
+        var erste = null;
+        var t = chats[idx].turns || [];
+        for (var k = 0; k < t.length; k++) {
+          if (t[k].role === 'user' && t[k].content) { erste = t[k].content; break; }
+        }
+        if (erste) {
+          erste = erste.replace(/\s+/g, ' ').trim();
+          b.textContent = erste.length > 22 ? erste.slice(0, 21) + '…' : erste;
+          b.title = uhr + ' — ' + erste;
+        } else {
+          b.textContent = 'leer';
+          b.title = uhr + ' — noch nichts gefragt';
+        }
+        if (idx === aktiverChat) { b.className = 'aktiv'; }
+        b.onclick = function () { chatOeffnen(idx); };
+        el.appendChild(b);
+      })(i);
+    }
+    var neu = document.createElement('button');
+    neu.textContent = '+ neu';
+    neu.onclick = neuerChat;
+    el.appendChild(neu);
+  }
+
   window.bridgeRefresh = function () {
     state.data = window.BRIDGE_DATA || null;
     renderModel();
     if (state.data) { setLive(true, 'lokal'); } else { setLive(false, 'keine Daten'); }
+
+    // Gespeicherte Gespraeche vom Programm uebernehmen - aber nur beim ersten
+    // Mal, damit ein laufender Chat nicht ueberschrieben wird.
+    if (!window.__verlaufGeladen && window.BRIDGE_CHATS) {
+      window.__verlaufGeladen = true;
+      try {
+        chats = window.BRIDGE_CHATS || [];
+        if (chats.length > 0 && echteTurns(chats[0].turns) > 0) {
+          aktiverChat = 0;
+          state.turns = chats[0].turns;
+          renderChatLog();
+        }
+      } catch (e) { chats = []; }
+    }
+    // Die Begruessung wird geschrieben, bevor die erste Messung da ist. Kommt
+    // sie danach an, muss der Platzhalter ersetzt werden - sonst stand oben
+    // laengst das Modell, waehrend der Chat noch "ich lese gerade aus" zeigte.
+    // Nur ersetzen, solange nichts gefragt wurde; ein laufendes Gespraech
+    // bleibt unangetastet.
+    if (state.data && echteTurns(state.turns) === 0 &&
+        state.turns.length > 0 && state.turns[0].platzhalter) {
+      seedGreeting(true);
+    }
+
+    renderVerlauf();
   };
 
   // Lokaler Modus: die Bridge legt dashboard-data.js neben diese Datei; dann

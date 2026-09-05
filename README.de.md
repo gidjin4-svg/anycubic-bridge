@@ -20,6 +20,31 @@ deinen Rechner.
 
 ---
 
+## Neu in 0.2.1
+
+- **Es liest die Geometrie, die wirklich in der Datei steht.** Projekte, die
+  Anycubic Slicer Next speichert, legen ihr Netz in einem eigenen Zip-Eintrag
+  ab, auf den per `p:path` verwiesen wird (3MF-Production-Erweiterung), nicht
+  in `3dmodel.model`. Dieser Eintrag wurde übersehen — solche Dateien kamen als
+  *0 Dreiecke* mit unendlichen Maßen heraus, **und Überhänge wurden nie
+  erkannt**. Bei einer Deckenhalterung blieben so 11.450 Flächen mit 90°
+  unbemerkt, und mit ihnen die Stützen, die das Teil braucht.
+- **Das Druckbett wird direkt nach dem Laden erkannt.** Der Slicer schreibt
+  seine Sitzungsdatei erst beim Speichern oder Schneiden. Bis dahin gab es
+  keine Quelle, und das Fenster meldete ein leeres Bett. Jetzt springt der
+  Fenstertitel ein, der es sofort weiß. Nennt er kein Projekt, bleibt es
+  ehrlich bei „leer".
+- **Eigene Filamentwerte in `slice` wirken endlich.** Es schrieb ein
+  angepasstes Filamentprofil und übergab dem Slicer dann das Original.
+  Kühlungswerte gehören ebenfalls ins Filamentprofil — im Prozessprofil stehen
+  sie drin und tun nichts.
+- **`merge` findet Auflageflächen unterhalb der Oberkante.** Es suchte nur
+  nahe dem höchsten Punkt; ein Teil mit kleinen Erhebungen oben und einer
+  großen brauchbaren Fläche 10 mm tiefer galt als „keine ebene Fläche".
+- **Neu: `tests/pruefstand.ps1`** — 26 Prüfungen, die jedes Verb mit echten
+  Dateien anfahren und nachmessen. Drei der obigen Fehler sind erst dadurch
+  aufgefallen.
+
 ## Neu in 0.2.0
 
 - **Es folgt dem Druckbett live.** Modell laden, tauschen oder runternehmen —
@@ -44,6 +69,11 @@ deinen Rechner.
   exportierten G-Code gelesen, nie geschätzt
 - Die empfohlenen Einstellungen, jede mit ihrem Grund
 - Ein Chat, der das alles kennt und es auch anwenden kann
+
+Nach einem Modellwechsel dauert es ein paar Sekunden, bis das Fenster nachzieht:
+es liest die Datei neu ein und zeichnet die Vorschau selbst. Bei großen Netzen
+(die Deckenhalterung hat 48.000 Dreiecke) können daraus auch mal 30 Sekunden
+werden. Es kommt von allein — Klicken beschleunigt nichts.
 
 ## Installation
 
@@ -135,6 +165,22 @@ cd widget
 Kein .NET-SDK nötig: es kompiliert mit dem C#-Compiler, der in Windows
 enthalten ist. Die WebView2-Bibliotheken holt der erste Build von NuGet — sie
 gehören Microsoft und liegen deshalb nicht im Repo.
+
+## Prüfen
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\pruefstand.ps1
+```
+
+Fährt jedes Verb mit echten Dateien auf deinem Rechner an und misst das
+Ergebnis nach — Geometrie gegen die Maße aus dem G-Code, geschriebene Profile
+gegen ihren Inhalt, `slice` gegen die Werte im fertigen G-Code. `-OhneSlice`
+lässt die beiden langsamen Slice-Läufe weg.
+
+Ein Hinweis, falls du selbst Tests ergänzt: der Einstellungsblock steht bei
+OrcaSlicer am **Ende** des G-Codes, nicht am Anfang. Und lass den Watcher nicht
+nebenher laufen, wenn du die Anzeigedatei prüfst — er überschreibt sie im
+Sekundentakt. Deshalb schreibt der Prüfstand mit `-OutFile` in eine eigene.
 
 Zwei Prüfschalter, wenn etwas klemmt:
 

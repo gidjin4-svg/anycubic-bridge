@@ -19,6 +19,30 @@ Everything runs locally. It reads local files and writes local files.
 
 ---
 
+## What's new in 0.2.1
+
+- **It reads the geometry that is actually in the file.** Projects saved by
+  Anycubic Slicer Next put their mesh in a separate zip entry referenced by
+  `p:path` (the 3MF production extension), not in `3dmodel.model`. That entry
+  was ignored, so every such file came out as *0 triangles* with infinite
+  dimensions — **and overhangs were never detected**. On a ceiling bracket
+  that meant 11,450 faces at 90° went unnoticed, and with them the supports
+  that part needs.
+- **The plate is recognised right after loading.** The slicer only writes its
+  session file when you save or slice, not when you load. Until then there was
+  no source and the window reported an empty bed. It now falls back to the
+  window title, which knows immediately. If the title names no project, it
+  honestly stays empty.
+- **Custom filament values in `slice` finally take effect.** It wrote a patched
+  filament profile and then handed the slicer the original one. Cooling values
+  belong in the filament profile too — in the process profile they sit there
+  and do nothing.
+- **`merge` finds resting surfaces below the top edge.** It only looked near
+  the highest point, so a part with small bosses on top and a large usable
+  face 10 mm lower was reported as having no flat surface at all.
+- **New: `tests/pruefstand.ps1`** — 26 checks that run every verb against real
+  files and measure the result. Three of the bugs above only surfaced there.
+
 ## What's new in 0.2.0
 
 - **It follows your plate live.** Load, swap or remove a model in the slicer
@@ -132,6 +156,22 @@ cd widget
 No .NET SDK needed: it compiles with the C# compiler that ships with Windows.
 The WebView2 libraries are fetched from NuGet on first build (they belong to
 Microsoft and are not committed here).
+
+## Testing
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\pruefstand.ps1
+```
+
+Runs every verb against real files on your machine and measures the result —
+geometry against the dimensions in the G-code, written profiles against their
+contents, `slice` against the values in the finished G-code. `-OhneSlice` skips
+the two slow slicing runs.
+
+Two things to know if you add tests of your own: OrcaSlicer puts its settings
+block at the **end** of the G-code, not the beginning. And don't leave the
+watcher running while you inspect the dashboard file — it rewrites it every few
+seconds, which is why the test suite writes to its own via `-OutFile`.
 
 Two switches help when something misbehaves:
 
