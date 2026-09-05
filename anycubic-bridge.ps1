@@ -126,7 +126,23 @@ function Get-AnycubicPlate {
     if (-not $sess) { return $result }
 
     $plate = Join-Path $sess.FullName '.3mf'
-    if (-not (Test-Path -LiteralPath $plate)) { return $result }
+    if (-not (Test-Path -LiteralPath $plate)) {
+        # Direkt nach dem Laden gibt es die Bett-Datei noch nicht - der Slicer
+        # schreibt sie erst bei der ersten Aenderung. Solange nehmen wir die
+        # Objektdateien der Sitzung. Das ist hier unbedenklich: ohne Bett-Datei
+        # wurde in dieser Sitzung auch noch nichts wieder entfernt.
+        $objDir = Join-Path $sess.FullName '3D\Objects'
+        if (Test-Path -LiteralPath $objDir) {
+            foreach ($f in (Get-ChildItem -LiteralPath $objDir -Filter '*.model' -File | Sort-Object LastWriteTime)) {
+                $result.Add([pscustomobject]@{
+                    File      = $f.FullName
+                    Name      = ($f.Name -replace '_\d+\.model$', '')
+                    Transform = $null
+                })
+            }
+        }
+        return $result
+    }
 
     $xml = $null
     $zip = [System.IO.Compression.ZipFile]::OpenRead($plate)
@@ -1457,10 +1473,22 @@ switch ($Action) {
                     } else {
                         $sess = Get-AnycubicSessionDir
                         if ($sess) {
+                            # Bett-Datei ist massgeblich, sobald es sie gibt.
+                            # Direkt nach dem Laden fehlt sie noch - dann zaehlen
+                            # die Objektdateien, sonst wuerde ein frisch
+                            # geladenes Modell nicht bemerkt.
                             $plateFile = Join-Path $sess.FullName '.3mf'
                             $stamp = if (Test-Path -LiteralPath $plateFile) {
                                 (Get-Item -LiteralPath $plateFile).LastWriteTimeUtc.Ticks
-                            } else { 'leer' }
+                            } else {
+                                $objDir = Join-Path $sess.FullName '3D\Objects'
+                                if (Test-Path -LiteralPath $objDir) {
+                                    $objs = @(Get-ChildItem -LiteralPath $objDir -Filter '*.model' -File)
+                                    if ($objs.Count -gt 0) {
+                                        'obj:' + $objs.Count + ':' + (($objs | Sort-Object LastWriteTimeUtc | Select-Object -Last 1).LastWriteTimeUtc.Ticks)
+                                    } else { 'leer' }
+                                } else { 'leer' }
+                            }
                             $key = $sess.FullName + '|' + $stamp
                         } else {
                             $key = 'kein-slicer'
