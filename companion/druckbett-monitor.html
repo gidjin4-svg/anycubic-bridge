@@ -520,8 +520,18 @@
   function renderModel() {
     var d = state.data;
     if (!d) {
-      els.modelBody.innerHTML = '<div class="empty-state">Noch kein Vorgang.<br>Lass die Bridge einmal &bdquo;recommend&ldquo; laufen.</div>';
+      els.modelBody.innerHTML = '<div class="empty-state">Noch keine Daten.<br>Laeuft der Watcher?</div>';
       els.updatedAt.textContent = '';
+      return;
+    }
+    // Nichts auf dem Bett: dann steht hier auch nichts. Frueher wurde
+    // ersatzweise die neueste Datei von der Platte gezeigt - das klebte dann
+    // fest, auch wenn im Slicer laengst was anderes offen war.
+    if (d.empty) {
+      els.modelBody.innerHTML =
+        '<div class="empty-state">Nichts auf dem Druckbett.<br>' +
+        'Lade ein Modell in Anycubic Slicer Next &mdash; es erscheint hier von selbst.</div>';
+      els.updatedAt.textContent = fmtTime(d.updatedAt);
       return;
     }
     var g = d.geometry || {};
@@ -627,7 +637,9 @@
   function seedGreeting() {
     var d = state.data;
     var greeting;
-    if (d) {
+    if (d && d.empty) {
+      greeting = 'Gerade liegt nichts auf dem Bett. Lade ein Modell in Anycubic Slicer Next, dann kann ich dir dazu was sagen.';
+    } else if (d) {
       greeting = (d.lastAction ? 'Zuletzt: ' + d.lastAction.what + '. ' : '')
         + 'Auf dem Bett liegt "' + d.model + '". Frag mich, warum die Werte so gesetzt sind — oder was du sonst wissen willst.';
     } else {

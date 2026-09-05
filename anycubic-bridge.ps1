@@ -89,6 +89,109 @@ function Read-AnycubicMainConf {
     return $text | ConvertFrom-Json
 }
 
+function Get-AnycubicSessionDir {
+    <#
+      Der Sitzungsordner der LAUFENDEN Slicer-Instanz. Er heisst
+      <zeit>#<prozess-id>#<n> und liegt unter %TEMP%\anycubicslicer_model.
+      Ohne laufenden Slicer gibt es keinen.
+    #>
+    $proc = Get-Process -Name '*AnycubicSlicerNext*' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $proc) { return $null }
+
+    $root = Join-Path $env:TEMP 'anycubicslicer_model'
+    if (-not (Test-Path -LiteralPath $root)) { return $null }
+
+    return Get-ChildItem -LiteralPath $root -Directory -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "*#$($proc.Id)#*" } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+}
+
+function Get-AnycubicPlate {
+    <#
+      Was JETZT auf dem Druckbett liegt - nicht was zuletzt geoeffnet wurde.
+
+      Der Slicer haelt den aktuellen Bett-Zustand in einer .3mf im
+      Sitzungsordner. Deren 3dmodel.model verweist per p:path auf die
+      Objektdateien. Wichtig: der Objects-Ordner SAMMELT auch entfernte
+      Objekte - massgeblich ist allein diese Liste.
+
+      Rueckgabe: Liste aus Pfad + Transformation, oder leere Liste wenn nichts
+      geladen ist.
+    #>
+    $sess = Get-AnycubicSessionDir
+    $result = New-Object System.Collections.Generic.List[object]
+    if (-not $sess) { return $result }
+
+    $plate = Join-Path $sess.FullName '.3mf'
+    if (-not (Test-Path -LiteralPath $plate)) { return $result }
+
+    $xml = $null
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($plate)
+    try {
+        $entry = $zip.Entries | Where-Object { $_.FullName -match '3dmodel\.model$' } | Select-Object -First 1
+        if (-not $entry) { return $result }
+        $reader = New-Object System.IO.StreamReader($entry.Open())
+        $xml = $reader.ReadToEnd()
+        $reader.Close()
+    } finally {
+        $zip.Dispose()
+    }
+
+    # Objekt-Id -> Datei (die Bauteile stehen in eigenen Dateien daneben)
+    $pathById = @{}
+    foreach ($m in [regex]::Matches($xml, '<object[^>]*id="(\d+)"[^>]*>(.*?)</object>', 'Singleline')) {
+        $objId = $m.Groups[1].Value
+        $comp = [regex]::Match($m.Groups[2].Value, 'p:path="([^"]+)"')
+        if ($comp.Success) { $pathById[$objId] = $comp.Groups[1].Value }
+    }
+
+    foreach ($m in [regex]::Matches($xml, '<item[^>]*objectid="(\d+)"[^>]*/>')) {
+        $tag = $m.Value
+        $objId = $m.Groups[1].Value
+        if ($tag -match 'printable="0"') { continue }
+        if (-not $pathById.ContainsKey($objId)) { continue }
+
+        $rel = $pathById[$objId].TrimStart('/')
+        $file = Join-Path $sess.FullName ($rel -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+
+        $transform = $null
+        $tm = [regex]::Match($tag, 'transform="([^"]+)"')
+        if ($tm.Success) {
+            $parts = @($tm.Groups[1].Value -split '\s+' | ForEach-Object { [double]$_ })
+            if ($parts.Count -eq 12) { $transform = $parts }
+        }
+
+        $result.Add([pscustomobject]@{
+            File      = $file
+            Name      = ([System.IO.Path]::GetFileName($file) -replace '_\d+\.model$', '')
+            Transform = $transform
+        })
+    }
+    return $result
+}
+
+function Get-AnycubicPlateTriangles {
+    param($Plate)
+    $all = New-Object System.Collections.Generic.List[object]
+    foreach ($obj in $Plate) {
+        $tris = Get-AnycubicMeshTriangles -Path $obj.File
+        foreach ($t in $tris) {
+            if ($obj.Transform) {
+                $p1 = Convert-AnycubicMfPoint -P $t[0] -T $obj.Transform
+                $p2 = Convert-AnycubicMfPoint -P $t[1] -T $obj.Transform
+                $p3 = Convert-AnycubicMfPoint -P $t[2] -T $obj.Transform
+                $tri = New-Object 'object[]' 3
+                $tri[0] = $p1; $tri[1] = $p2; $tri[2] = $p3
+                $all.Add($tri)
+            } else {
+                $all.Add($t)
+            }
+        }
+    }
+    return $all
+}
+
 function Get-AnycubicActiveModelPath {
     param($MainConf)
     $candidates = New-Object System.Collections.Generic.List[string]
@@ -176,8 +279,14 @@ function Get-AnycubicMeshFrom3mf {
     param([string]$Path)
     $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
     try {
+        # Normale 3MF-Dateien haben 3D/3dmodel.model. Die Sitzungsdateien des
+        # Slicers heissen dagegen nach dem Objekt (3D/Objects/<Name>.model),
+        # sind aber derselbe Aufbau - deshalb beides zulassen.
         $entry = $zip.Entries | Where-Object { $_.FullName -match '3dmodel\.model$' } | Select-Object -First 1
-        if (-not $entry) { throw "Kein 3dmodel.model in 3MF gefunden: $Path [$AnycubicBridgeWatermark]" }
+        if (-not $entry) {
+            $entry = $zip.Entries | Where-Object { $_.FullName -match '\.model$' } | Select-Object -First 1
+        }
+        if (-not $entry) { throw "Keine Modelldaten in der Datei gefunden: $Path [$AnycubicBridgeWatermark]" }
         $stream = $entry.Open()
         $reader = New-Object System.IO.StreamReader($stream)
         $xmlText = $reader.ReadToEnd()
@@ -216,14 +325,21 @@ function Get-AnycubicMeshFrom3mf {
     $itemNodes = $xml.SelectNodes('//m:build/m:item', $ns)
     if ($itemNodes.Count -eq 0) { $itemNodes = $xml.SelectNodes('//build/item') }
 
+    # Objektdateien aus dem Sitzungsordner haben keinen <build>-Abschnitt - der
+    # steht in der Bett-Datei, die auf sie verweist. Dann einfach alle Objekte
+    # nehmen, die Platzierung kommt von aussen.
+    $ohneBuild = ($itemNodes.Count -eq 0)
+
     $triangles = New-Object System.Collections.Generic.List[object]
-    foreach ($item in $itemNodes) {
-        $oid = [string]$item.objectid
+    $quellen = if ($ohneBuild) { $objects.Keys } else { $itemNodes }
+
+    foreach ($item in $quellen) {
+        $oid = if ($ohneBuild) { [string]$item } else { [string]$item.objectid }
         if (-not $objects.ContainsKey($oid)) { continue }
         $o = $objects[$oid]
 
         $transform = $null
-        if ($item.transform) {
+        if (-not $ohneBuild -and $item.transform) {
             $parts = @($item.transform -split '\s+' | ForEach-Object { [double]$_ })
             if ($parts.Count -eq 12) { $transform = $parts }
         }
@@ -251,7 +367,10 @@ function Get-AnycubicMeshTriangles {
     switch ($ext) {
         '.stl' { return Get-AnycubicMeshFromStl -Path $Path }
         '.3mf' { return Get-AnycubicMeshFrom3mf -Path $Path }
-        default { throw "Nicht unterstuetztes Format: $ext (nur .stl/.3mf). [$AnycubicBridgeWatermark]" }
+        # Die Objektdateien im Sitzungsordner des Slicers heissen .model, sind
+        # aber derselbe Aufbau wie 3MF.
+        '.model' { return Get-AnycubicMeshFrom3mf -Path $Path }
+        default { throw "Nicht unterstuetztes Format: $ext (nur .stl/.3mf/.model). [$AnycubicBridgeWatermark]" }
     }
 }
 
@@ -982,10 +1101,33 @@ function Get-AnycubicDashboardDoc {
 
     $configRoot = Get-AnycubicConfigRoot
     $mainConf = Read-AnycubicMainConf -ConfigRoot $configRoot
-    $resolvedModelPath = if ($ModelPathOverride) { $ModelPathOverride } else { Get-AnycubicActiveModelPath -MainConf $mainConf }
-    if (-not $resolvedModelPath) { throw "Kein Modell gefunden. Bitte -ModelPath angeben. [$AnycubicBridgeWatermark]" }
 
-    $triangles = Get-AnycubicMeshTriangles -Path $resolvedModelPath
+    # Massgeblich ist, was JETZT auf dem Bett liegt. Nur wenn jemand ausdruecklich
+    # eine Datei vorgibt, wird die genommen.
+    $plate = @()
+    $resolvedModelPath = $null
+    $modelName = $null
+    if ($ModelPathOverride) {
+        $resolvedModelPath = $ModelPathOverride
+        $modelName = [System.IO.Path]::GetFileName($ModelPathOverride)
+        $triangles = Get-AnycubicMeshTriangles -Path $resolvedModelPath
+    } else {
+        $plate = @(Get-AnycubicPlate)
+        if ($plate.Count -eq 0) {
+            # Nichts geladen: ehrlich leer melden, statt irgendeine alte Datei
+            # von der Platte zu zeigen.
+            return [ordered]@{
+                empty     = $true
+                machine   = $mainConf.presets.machine
+                updatedAt = (Get-Date).ToString('o')
+                hinweis   = 'Nichts auf dem Druckbett - lade ein Modell in Anycubic Slicer Next.'
+            }
+        }
+        $triangles = Get-AnycubicPlateTriangles -Plate $plate
+        $modelName = (($plate | ForEach-Object { $_.Name }) -join ' + ')
+        $resolvedModelPath = $plate[0].File
+    }
+
     $stats = Get-AnycubicMeshStats -Triangles $triangles -OverhangThreshold $OverhangThreshold
     $rec = Get-AnycubicRecommendation -Stats $stats -OverhangThreshold $OverhangThreshold
 
@@ -1034,8 +1176,10 @@ function Get-AnycubicDashboardDoc {
     if ($slice -and $slice.layers) { $layerCount = $slice.layers }
 
     return [ordered]@{
-        model     = [System.IO.Path]::GetFileName($resolvedModelPath)
+        empty     = $false
+        model     = $modelName
         modelPath = $resolvedModelPath
+        objects   = @($plate | ForEach-Object { $_.Name })
         machine   = $targetMachine
         updatedAt = (Get-Date).ToString('o')
         preview   = Get-AnycubicPreviewDataUri -Triangles $triangles
@@ -1296,12 +1440,31 @@ switch ($Action) {
                 try {
                     $configRoot = Get-AnycubicConfigRoot
                     $mainConf = Read-AnycubicMainConf -ConfigRoot $configRoot
-                    $model = if ($ModelPath) { $ModelPath } else { Get-AnycubicActiveModelPath -MainConf $mainConf }
+                    $model = $ModelPath
+
+                    # Kennung des aktuellen Zustands. Massgeblich ist das Bett -
+                    # so wird auch bemerkt, wenn ein Objekt entfernt oder ein
+                    # ganz anderes geladen wird.
                     $key = $null
-                    if ($model -and (Test-Path -LiteralPath $model)) {
-                        $item = Get-Item -LiteralPath $model
-                        $key = $item.FullName + '|' + $item.LastWriteTimeUtc.Ticks + '|' + $mainConf.presets.machine
+                    if ($model) {
+                        if (Test-Path -LiteralPath $model) {
+                            $item = Get-Item -LiteralPath $model
+                            $key = $item.FullName + '|' + $item.LastWriteTimeUtc.Ticks
+                        }
+                    } else {
+                        $sess = Get-AnycubicSessionDir
+                        if ($sess) {
+                            $plateFile = Join-Path $sess.FullName '.3mf'
+                            $stamp = if (Test-Path -LiteralPath $plateFile) {
+                                (Get-Item -LiteralPath $plateFile).LastWriteTimeUtc.Ticks
+                            } else { 'leer' }
+                            $key = $sess.FullName + '|' + $stamp
+                        } else {
+                            $key = 'kein-slicer'
+                        }
                     }
+                    if ($key) { $key = $key + '|' + $mainConf.presets.machine }
+
                     if ($key -and $key -ne $lastKey) {
                         $doc = Get-AnycubicDashboardDoc -ModelPathOverride $model -MachineOverride $MachinePreset -OverhangThreshold $OverhangThreshold
                         Write-AnycubicDashboardData -Doc $doc -OutFile $target
