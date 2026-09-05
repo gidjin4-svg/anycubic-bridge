@@ -154,6 +154,39 @@ Pruefe 'writeprofile vertraegt Sonderzeichen im Namen' {
     $null
 }
 
+Pruefe '-IntoActive verlangt -Values statt blind alles zu ueberschreiben' {
+    $o = Bridge @('writeprofile', '-IntoActive', '-Force')
+    if ($o -notmatch 'braucht -Values') { return "warnt nicht: $o" }
+    $null
+}
+
+Pruefe '-IntoActive aendert das ausgewaehlte Profil und sichert es vorher' {
+    $st = Bridge @('status')
+    $aktiv = ([regex]::Match($st, 'AktivesProfil\s*:\s*(.+)')).Groups[1].Value.Trim()
+    if (-not $aktiv -or $aktiv -eq '(unbekannt)') { return $null }   # nichts ausgewaehlt, nicht pruefbar
+    $datei = Join-Path $env:APPDATA "AnycubicSlicerNext\user\default\process\$aktiv.json"
+    if (-not (Test-Path -LiteralPath $datei)) { return $null }       # System-Profil, wird nicht angefasst
+
+    $vorher = Get-Content -LiteralPath $datei -Raw
+    $o = Bridge @('writeprofile', '-IntoActive', '-Values', 'top_shell_layers=9', '-Force')
+    try {
+        if ($o -notmatch 'AKTIVE Profil') { return "kein Hinweis auf das aktive Profil: $o" }
+        if ($o -notmatch 'Sicherung:') { return "keine Sicherung angelegt" }
+        $j = Get-Content -LiteralPath $datei -Raw | ConvertFrom-Json
+        if ([string]$j.top_shell_layers -ne '9') { return "Wert nicht gesetzt" }
+        # Bestehende Werte des Nutzers muessen erhalten bleiben.
+        $alt = $vorher | ConvertFrom-Json
+        foreach ($k in $alt.PSObject.Properties.Name) {
+            if ($k -eq 'top_shell_layers') { continue }
+            if ([string]$j.$k -ne [string]$alt.$k) { return "bestehender Wert '$k' wurde veraendert" }
+        }
+        $null
+    } finally {
+        # Immer zuruecksetzen - der Prueflauf darf keine echte Konfiguration hinterlassen.
+        Set-Content -LiteralPath $datei -Value $vorher -Encoding UTF8 -NoNewline
+    }
+}
+
 Write-Host "`n=== 4. Anzeige ===" -ForegroundColor Cyan
 
 Pruefe 'preview erzeugt ein echtes PNG' {

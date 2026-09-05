@@ -54,7 +54,17 @@ param(
     [string]$ColorChangeCommand = 'M600',
     [double]$OverhangThreshold = 55,
     [int]$IntervalSeconds = 10,
-    [switch]$Force
+    [switch]$Force,
+
+    # Werte in das GERADE AUSGEWAEHLTE Prozessprofil schreiben, statt ein neues
+    # anzulegen. Damit entfaellt das Auswaehlen im Dropdown - nach dem Neustart
+    # ist alles aktiv. Eine Sicherung der Originaldatei wird vorher abgelegt.
+    [switch]$IntoActive,
+
+    # Slicer sauber schliessen, schreiben, wieder mit demselben Projekt starten.
+    # Noetig, weil der Slicer seine Profile nur beim Start liest UND sie beim
+    # Beenden mit seinem eigenen Stand ueberschreibt.
+    [switch]$RestartSlicer
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,6 +117,74 @@ function Get-AnycubicSessionDir {
     return Get-ChildItem -LiteralPath $root -Directory -Recurse -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like "*#$($proc.Id)#*" } |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
+}
+
+function Stop-AnycubicSlicer {
+    <#
+      Schliesst den Slicer und wartet, bis er wirklich weg ist.
+
+      Sauber schliessen, nicht abschiessen: der Slicer schreibt beim Beenden
+      seine Konfiguration samt Profildateien zurueck. Wird er hart beendet,
+      bleibt sie auf altem Stand oder halb geschrieben liegen.
+
+      Rueckgabe: der Projektname, der offen war (oder $null).
+    #>
+    param([int]$TimeoutSeconds = 60)
+
+    $proc = Get-Process -Name '*AnycubicSlicerNext*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowTitle } | Select-Object -First 1
+    if (-not $proc) { return $null }
+
+    $offen = Get-AnycubicOpenProjectName
+    [void]$proc.CloseMainWindow()
+    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+        throw ("Anycubic Slicer Next liess sich nicht schliessen (PID $($proc.Id)). " +
+               "Wahrscheinlich fragt er nach ungespeicherten Aenderungen - bitte im Fenster beantworten. " +
+               "[$AnycubicBridgeWatermark]")
+    }
+    # Der Prozess ist weg, die Datei-Handles brauchen noch einen Moment.
+    Start-Sleep -Milliseconds 1500
+    return $offen
+}
+
+function Start-AnycubicSlicer {
+    <#
+      Startet den Slicer und laedt, wenn moeglich, dasselbe Projekt wieder.
+      Wartet, bis das Fenster den Projektnamen traegt - sonst meldet die
+      Bett-Erkennung gleich darauf noch "leer".
+    #>
+    param([string]$ProjectName, $MainConf, [int]$TimeoutSeconds = 90)
+
+    $exe = Join-Path (Get-AnycubicInstallRoot) 'AnycubicSlicerNext.exe'
+    $datei = if ($ProjectName) { Resolve-AnycubicProjectFile -MainConf $MainConf -Name $ProjectName } else { $null }
+
+    if ($datei) { Start-Process -FilePath $exe -ArgumentList ('"' + $datei + '"') }
+    else        { Start-Process -FilePath $exe }
+
+    $bis = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        Start-Sleep -Seconds 2
+        $jetzt = Get-AnycubicOpenProjectName
+        if (-not $ProjectName -and (Get-Process -Name '*AnycubicSlicerNext*' -ErrorAction SilentlyContinue)) { return $true }
+    } while ($jetzt -ne $ProjectName -and (Get-Date) -lt $bis)
+
+    return ($jetzt -eq $ProjectName)
+}
+
+function Backup-AnycubicProfile {
+    <#
+      Legt eine Kopie einer Profildatei ab, bevor sie veraendert wird.
+      Bewusst NICHT im Profilordner: der Slicer liest dort jede .json als
+      Profil ein, eine Sicherungsdatei taeuchte sonst im Dropdown auf.
+    #>
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $dir = Join-Path (Join-Path $env:APPDATA 'AnycubicBridge') 'profil-sicherungen'
+    if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+    $name = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+    $ziel = Join-Path $dir ($name + '-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')
+    Copy-Item -LiteralPath $Path -Destination $ziel -Force
+    return $ziel
 }
 
 function Get-AnycubicActiveCombo {
@@ -194,6 +272,28 @@ function Resolve-AnycubicProjectFile {
     return $null
 }
 
+function Get-AnycubicPlateFromTitle {
+    <#
+      Notquelle, wenn die Sitzungsdaten (noch) nichts hergeben: der
+      Fenstertitel nennt das geladene Projekt sofort, und ueber die zuletzt
+      geoeffneten Projekte laesst sich die Datei dazu finden.
+
+      Nennt der Titel kein Projekt, ist das Bett wirklich leer - dann wird
+      bewusst NICHTS geraten.
+    #>
+    $liste = New-Object System.Collections.Generic.List[object]
+    $offen = Get-AnycubicOpenProjectName
+    if (-not $offen) { return $liste }
+
+    $conf = $null
+    try { $conf = Read-AnycubicMainConf -ConfigRoot (Get-AnycubicConfigRoot) } catch { }
+    $datei = Resolve-AnycubicProjectFile -MainConf $conf -Name $offen
+    if ($datei) {
+        $liste.Add([pscustomobject]@{ File = $datei; Name = $offen; Transform = $null })
+    }
+    return $liste
+}
+
 function Get-AnycubicPlate {
     <#
       Was JETZT auf dem Druckbett liegt - nicht was zuletzt geoeffnet wurde.
@@ -233,16 +333,7 @@ function Get-AnycubicPlate {
         # Der Fenstertitel weiss es aber sofort - darueber die Datei suchen.
         # Bleibt ehrlich: nennt der Titel kein Projekt, ist das Bett wirklich
         # leer, und es wird nichts geraten.
-        $offen = Get-AnycubicOpenProjectName
-        if ($offen) {
-            $conf = $null
-            try { $conf = Read-AnycubicMainConf -ConfigRoot (Get-AnycubicConfigRoot) } catch { }
-            $datei = Resolve-AnycubicProjectFile -MainConf $conf -Name $offen
-            if ($datei) {
-                $result.Add([pscustomobject]@{ File = $datei; Name = $offen; Transform = $null })
-            }
-        }
-        return $result
+        return (Get-AnycubicPlateFromTitle)
     }
 
     $xml = $null
@@ -288,6 +379,12 @@ function Get-AnycubicPlate {
             Transform = $transform
         })
     }
+
+    # Die Bett-Datei kann ein Skelett sein: sie verweist per p:path auf
+    # Objektdateien, die der Slicer erst beim Speichern oder Schneiden
+    # tatsaechlich hinlegt. Dann steht hier eine gueltige Datei, in der nichts
+    # zu finden ist - und das darf nicht als "Bett leer" durchgehen.
+    if ($result.Count -eq 0) { return (Get-AnycubicPlateFromTitle) }
     return $result
 }
 
@@ -1831,9 +1928,18 @@ switch ($Action) {
     }
 
     'writeprofile' {
-        if ([string]::IsNullOrWhiteSpace($ProfileName)) {
-            throw "-ProfileName wird benoetigt, z. B. 'Claude Tuergriff'. [$AnycubicBridgeWatermark]"
+        # Mit -IntoActive steht der Zielname schon fest: das gerade ausgewaehlte
+        # Profil. Ein eigener Name waere dann sinnlos.
+        if (-not $IntoActive -and [string]::IsNullOrWhiteSpace($ProfileName)) {
+            throw "-ProfileName wird benoetigt, z. B. 'Claude Tuergriff' - oder -IntoActive, um das ausgewaehlte Profil zu aendern. [$AnycubicBridgeWatermark]"
         }
+        if ($IntoActive -and -not $Values) {
+            # Ohne -Values kaeme die Empfehlung zum Zug; die schreibt viele
+            # Werte auf einmal in ein bestehendes Profil. Das ist zu grob fuer
+            # eine Datei, die der Nutzer selbst gepflegt hat.
+            throw "-IntoActive braucht -Values (genau die Werte, die geaendert werden sollen). [$AnycubicBridgeWatermark]"
+        }
+        if (-not $ProfileName) { $ProfileName = 'Bridge' }
         $configRoot = Get-AnycubicConfigRoot
         $mainConf = Read-AnycubicMainConf -ConfigRoot $configRoot
 
@@ -1890,17 +1996,73 @@ switch ($Action) {
             "--- info ---"
             $newInfoText
         } else {
-            $anycubicProcess = Get-Process -Name '*AnycubicSlicerNext*' -ErrorAction SilentlyContinue | Select-Object -First 1
-            Write-AnycubicBridgeTextFile -Path $newJsonPath -Text $newJsonText
-            Write-AnycubicBridgeTextFile -Path $newInfoPath -Text $newInfoText
-            "Geschrieben: $newJsonPath"
-            "Geschrieben: $newInfoPath"
-            if ($anycubicProcess) {
-                "Anycubic Slicer Next laeuft gerade (PID $($anycubicProcess.Id)) - neu starten, damit das Profil im Process-Dropdown erscheint."
-            } else {
-                "Anycubic Slicer Next starten - das Profil sollte im Process-Dropdown fuer '$($template.Inherits)'-kompatible Drucker erscheinen."
+            $laeuft = Get-Process -Name '*AnycubicSlicerNext*' -ErrorAction SilentlyContinue |
+                Where-Object { $_.MainWindowTitle } | Select-Object -First 1
+
+            # Reihenfolge ist entscheidend: erst schliessen, DANN schreiben.
+            # Der Slicer schreibt seine Profildateien beim Beenden mit seinem
+            # eigenen Stand zurueck - wer vorher schreibt, verliert die Werte
+            # wieder, ohne dass es auffaellt.
+            $warOffen = $null
+            if ($RestartSlicer -and $laeuft) {
+                "Schliesse Anycubic Slicer Next (PID $($laeuft.Id))..."
+                $warOffen = Stop-AnycubicSlicer
+                if ($warOffen) { "  offenes Projekt gemerkt: $warOffen" }
+                $laeuft = $null
+                # Nach dem Beenden hat der Slicer die Konfig neu geschrieben -
+                # die aktive Auswahl kann sich geaendert haben.
+                $mainConf = Read-AnycubicMainConf -ConfigRoot $configRoot
             }
-            "Hinweis: automatische AKTIVIERUNG ist bei Anycubic Slicer Next NICHT implementiert (Hauptkonfig ist pruefsummengeschuetzt) - Profil manuell im Dropdown auswaehlen. [$AnycubicBridgeWatermark]"
+
+            if ($IntoActive) {
+                # In das bereits ausgewaehlte Profil schreiben. Damit entfaellt
+                # das Auswaehlen im Dropdown komplett - das ist der einzige Weg
+                # ohne Eingriff in die pruefsummengeschuetzte Hauptkonfig.
+                $aktiv = Get-AnycubicActiveCombo -MainConf $mainConf
+                if (-not $aktiv.Prozess -or $aktiv.Prozess -eq '(unbekannt)') {
+                    throw "Es ist kein Prozessprofil ausgewaehlt - ohne -IntoActive nochmal versuchen. [$AnycubicBridgeWatermark]"
+                }
+                $zielPfad = Join-Path $processDir ($aktiv.Prozess + '.json')
+                if (-not (Test-Path -LiteralPath $zielPfad)) {
+                    throw ("Das ausgewaehlte Profil '$($aktiv.Prozess)' ist ein System-Profil und liegt nicht unter " +
+                           "user\default\process. System-Profile werden nicht veraendert. Lege stattdessen ein eigenes an " +
+                           "(ohne -IntoActive) und waehle es einmal im Slicer aus. [$AnycubicBridgeWatermark]")
+                }
+
+                $sicherung = Backup-AnycubicProfile -Path $zielPfad
+                $bestehend = Get-Content -LiteralPath $zielPfad -Raw -Encoding UTF8 | ConvertFrom-Json
+                foreach ($k in $rec.Values.Keys) {
+                    $bestehend | Add-Member -NotePropertyName $k -NotePropertyValue ([string]$rec.Values[$k]) -Force
+                }
+                Write-AnycubicBridgeTextFile -Path $zielPfad -Text ($bestehend | ConvertTo-Json -Depth 8)
+                "Werte in das AKTIVE Profil geschrieben: $($aktiv.Prozess)"
+                "  Datei:     $zielPfad"
+                if ($sicherung) { "  Sicherung: $sicherung" }
+                "  Gesetzt:   " + (($rec.Values.Keys | ForEach-Object { "$_=$($rec.Values[$_])" }) -join ', ')
+            } else {
+                Write-AnycubicBridgeTextFile -Path $newJsonPath -Text $newJsonText
+                Write-AnycubicBridgeTextFile -Path $newInfoPath -Text $newInfoText
+                "Geschrieben: $newJsonPath"
+                "Geschrieben: $newInfoPath"
+            }
+
+            if ($RestartSlicer) {
+                "Starte Anycubic Slicer Next wieder..."
+                $ok = Start-AnycubicSlicer -ProjectName $warOffen -MainConf $mainConf
+                if ($ok) {
+                    if ($warOffen) { "Fertig - '$warOffen' ist wieder geladen." } else { "Fertig - Slicer laeuft wieder." }
+                    if ($IntoActive) { "Die Werte sind aktiv, ohne dass du im Dropdown etwas auswaehlen musst." }
+                    else { "Das neue Profil steht jetzt im Prozess-Dropdown - einmal auswaehlen." }
+                } else {
+                    "Slicer gestartet, aber das Projekt kam nicht zurueck - bitte von Hand oeffnen."
+                }
+            } elseif ($laeuft) {
+                "Anycubic Slicer Next laeuft gerade (PID $($laeuft.Id)). Er liest Profile NUR beim Start und schreibt sie"
+                "beim Beenden mit seinem eigenen Stand zurueck - diese Aenderung geht dabei verloren."
+                "Mit -RestartSlicer erledigt die Bruecke das Schliessen, Schreiben und Neuladen in einem Rutsch."
+            } elseif (-not $IntoActive) {
+                "Anycubic Slicer Next starten - das Profil erscheint im Prozess-Dropdown."
+            }
         }
     }
 }
